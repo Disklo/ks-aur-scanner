@@ -113,12 +113,26 @@ This scanner implements detection rules based on real-world attacks and security
 
 ### From AUR
 
-```bash
-# Using paru
-paru -S ks-aur-scanner
+Three packages install the same `aur-scan` binary — pick one:
 
-# Using yay
-yay -S ks-aur-scanner
+| Package | Tracks |
+|---------|--------|
+| `aur-scanner-git` | Latest commit (rolling) |
+| `aur-scanner` | Tagged releases |
+| `ks-aur-scanner` | Tagged releases (same, different name) |
+
+```bash
+paru -S aur-scanner        # or: yay -S aur-scanner
+```
+
+The tagged packages (`aur-scanner`, `ks-aur-scanner`) build from our
+**GPG-signed release tag** and verify it against our signing key
+(`validpgpkeys`), so `makepkg` refuses to build a tag that isn't signed by us —
+integrity comes from the signature, not a tarball hash. If your AUR helper does
+not fetch the key automatically, import it once:
+
+```bash
+gpg --recv-keys 25631EAE3F43999050B7D7021132BF893C33FB51
 ```
 
 ### From Source
@@ -139,11 +153,16 @@ sudo install -Dm755 target/release/aur-scan /usr/bin/aur-scan
 sudo install -Dm755 target/release/aur-scan-wrap /usr/bin/aur-scan-wrap
 sudo install -Dm755 target/release/aur-scan-hook /usr/bin/aur-scan-hook
 
-# Install shell integration (optional)
+# Install shell integration (recommended — scans BEFORE makepkg builds)
 sudo install -Dm644 install/integration.bash /usr/share/aur-scan/integration.bash
 sudo install -Dm644 install/integration.zsh /usr/share/aur-scan/integration.zsh
 
-# Install pacman hook (optional)
+# Install the community rules example
+sudo install -Dm644 install/rules.d/example.toml /usr/share/aur-scanner/rules.d/example.toml
+
+# Pacman hook — opt-in backstop only. It runs AFTER makepkg has already built
+# (and executed) the package, so it catches .install scriptlets, not build-time
+# payloads. Prefer the shell integration above. Enable it deliberately:
 sudo install -Dm644 install/aur-scan.hook /usr/share/libalpm/hooks/aur-scan.hook
 ```
 
