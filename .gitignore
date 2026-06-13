@@ -23,3 +23,5 @@ Thumbs.db
 *.log
 blog/
 blog/
+aur/aur-scanner/
+aur/ks-aur-scanner/
