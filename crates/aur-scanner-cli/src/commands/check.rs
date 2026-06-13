@@ -1,253 +1,293 @@
-//! Check command - fetch and scan a package from AUR before installation
+//! Check command - resolve the dependency tree, scan it, and emit a reviewable
+//! SBOM BEFORE installation.
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
+use std::path::PathBuf;
 
-use aur_scanner_core::aur::AurClient;
+use aur_scanner_core::aur::{AurClient, PackageInfoSource};
+use aur_scanner_core::depgraph::{self, DependencyGraph, PackageSource, ResolveOptions};
+use aur_scanner_core::overlay::{info_from_pkgbuild, OverlaySource};
+use aur_scanner_core::parser::{PkgbuildParser, StaticParser};
+use aur_scanner_core::sbom::{self, ComponentScan};
 use aur_scanner_core::{Scanner, Severity};
 
 use super::banner;
-use crate::output;
 
-/// Run the check command - fetch package from AUR and scan it
-pub async fn run(
-    package_names: Vec<String>,
-    min_severity: Option<Severity>,
-    interactive: bool,
-    fail_on: Option<Severity>,
-) -> Result<()> {
+/// Arguments for the pre-install check.
+pub struct CheckArgs {
+    /// Packages the user asked to install (the roots).
+    pub package_names: Vec<String>,
+    /// Minimum severity to report.
+    pub min_severity: Option<Severity>,
+    /// Prompt before "proceeding".
+    pub interactive: bool,
+    /// Fail (non-zero exit) if findings at or above this severity exist.
+    pub fail_on: Option<Severity>,
+    /// Resolve and scan the full AUR dependency tree, not just the roots.
+    pub resolve_deps: bool,
+    /// Follow optional dependencies.
+    pub include_optional: bool,
+    /// Write a CycloneDX SBOM here.
+    pub sbom_path: Option<PathBuf>,
+    /// Already-fetched package directories to scan from disk (race-free).
+    pub local_dirs: Vec<PathBuf>,
+}
+
+/// Run the pre-install check.
+pub async fn run(args: CheckArgs) -> Result<()> {
     let client = AurClient::new().context("Failed to create AUR client")?;
     let scanner = Scanner::with_defaults().context("Failed to create scanner")?;
 
-    let mut total_critical = 0;
-    let mut total_high = 0;
-    let mut all_passed = true;
+    banner::print_header("Pre-Install Check");
+    println!();
 
-    for (idx, package_name) in package_names.iter().enumerate() {
-        if idx == 0 {
-            banner::print_header("Pre-Install Check");
+    // Parse any local package dirs so we can scan the EXACT on-disk bytes the
+    // build will use (closing the time-of-check/time-of-use gap) and feed their
+    // declared dependencies into resolution.
+    let mut local_infos = Vec::new();
+    let mut local_dir_by_name: HashMap<String, PathBuf> = HashMap::new();
+    let parser = StaticParser::new();
+    for dir in &args.local_dirs {
+        let pkgbuild_path = dir.join("PKGBUILD");
+        let content = std::fs::read_to_string(&pkgbuild_path)
+            .with_context(|| format!("reading {}", pkgbuild_path.display()))?;
+        let parsed = parser
+            .parse(&content)
+            .with_context(|| format!("parsing {}", pkgbuild_path.display()))?;
+        for info in info_from_pkgbuild(&parsed) {
+            local_dir_by_name.insert(info.name.clone(), dir.clone());
+            local_infos.push(info);
         }
-
-        println!();
-        println!(
-            "{} {}",
-            "Package:".cyan().bold(),
-            package_name.white().bold()
-        );
-        banner::print_divider();
-
-        // Fetch package info first
-        match client.get_package_info(package_name).await {
-            Ok(info) => {
-                print_package_info(&info);
-                println!();
-            }
-            Err(e) => {
-                println!("{} {}", "Error:".red().bold(), e);
-                all_passed = false;
-                continue;
-            }
-        }
-
-        // Fetch and scan PKGBUILD
-        println!("{}", "Fetching PKGBUILD...".dimmed());
-
-        let fetched = match client.fetch_pkgbuild(package_name).await {
-            Ok(f) => f,
-            Err(e) => {
-                println!("{} {}", "Failed to fetch:".red().bold(), e);
-                all_passed = false;
-                continue;
-            }
-        };
-
-        println!(
-            "{} {}",
-            "Scanning:".dimmed(),
-            fetched.pkgbuild_path.display()
-        );
-
-        let result = scanner
-            .scan_pkgbuild(&fetched.pkgbuild_path)
-            .await
-            .context("Scan failed")?;
-
-        // Filter by severity if specified
-        let findings: Vec<_> = result
-            .findings
-            .iter()
-            .filter(|f| {
-                if let Some(min) = min_severity {
-                    f.severity <= min
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        // Count severity levels
-        let critical_count = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-        let high_count = findings.iter().filter(|f| f.severity == Severity::High).count();
-        let medium_count = findings.iter().filter(|f| f.severity == Severity::Medium).count();
-        let low_count = findings.iter().filter(|f| f.severity == Severity::Low).count();
-
-        total_critical += critical_count;
-        total_high += high_count;
-
-        println!();
-
-        if findings.is_empty() {
-            println!(
-                "{}",
-                "No security issues found.".green().bold()
-            );
-        } else {
-            // Print findings
-            for finding in &findings {
-                output::print_finding(finding);
-            }
-
-            println!();
-            println!("{}", "=".repeat(60));
-            print!("Found ");
-            if critical_count > 0 {
-                print!("{} ", format!("{} CRITICAL", critical_count).red().bold());
-            }
-            if high_count > 0 {
-                print!("{} ", format!("{} HIGH", high_count).yellow().bold());
-            }
-            if medium_count > 0 {
-                print!("{} ", format!("{} MEDIUM", medium_count).blue());
-            }
-            if low_count > 0 {
-                print!("{} ", format!("{} LOW", low_count).white());
-            }
-            println!("issue(s)");
-        }
-
-        // Check fail condition
-        if let Some(fail_severity) = fail_on {
-            let should_fail = findings.iter().any(|f| f.severity <= fail_severity);
-            if should_fail {
-                all_passed = false;
-            }
-        }
-
-        // Interactive prompt
-        if interactive && !findings.is_empty() {
-            println!();
-            if critical_count > 0 {
-                println!(
-                    "{}",
-                    "WARNING: Critical security issues detected!".red().bold()
-                );
-            }
-
-            print!(
-                "{} ",
-                "Proceed with installation? [y/N]:".yellow().bold()
-            );
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim().to_lowercase();
-
-            if input != "y" && input != "yes" {
-                println!("{}", "Installation aborted by user.".yellow());
-                all_passed = false;
-            } else {
-                println!("{}", "User accepted risks, proceeding...".dimmed());
-            }
-        }
-
-        println!();
     }
-
-    // Summary for multiple packages
-    if package_names.len() > 1 {
-        println!("{}", "=".repeat(60));
-        println!("{}", "Summary".cyan().bold());
+    if !local_dir_by_name.is_empty() {
         println!(
-            "Scanned {} packages: {} CRITICAL, {} HIGH issues total",
-            package_names.len(),
-            total_critical,
-            total_high
+            "{} scanning {} package dir(s) from disk (race-free)",
+            "local:".green().bold(),
+            local_dir_by_name.len()
         );
     }
 
-    if all_passed {
-        Ok(())
+    // Roots: explicit names plus any package names discovered in local dirs.
+    let mut roots = args.package_names.clone();
+    for name in local_dir_by_name.keys() {
+        if !roots.contains(name) {
+            roots.push(name.clone());
+        }
+    }
+    if roots.is_empty() {
+        anyhow::bail!("no packages to check (pass package names and/or --local <dir>)");
+    }
+
+    // 1. Resolve the dependency closure (roots only if --no-deps). Local dirs
+    // overlay the AUR RPC so the full tree still resolves.
+    let opts = ResolveOptions {
+        include_optional: args.include_optional,
+        // --no-deps => expand nothing past the roots.
+        max_depth: if args.resolve_deps { ResolveOptions::default().max_depth } else { 0 },
+        ..ResolveOptions::default()
+    };
+    println!("{}", "Resolving dependency tree...".dimmed());
+    let overlay = OverlaySource::new(local_infos, &client);
+    let source: &dyn PackageInfoSource = if local_dir_by_name.is_empty() {
+        &client
     } else {
-        anyhow::bail!("Security issues detected or user aborted")
+        &overlay
+    };
+    let graph = depgraph::resolve(source, &roots, &opts)
+        .await
+        .context("Failed to resolve dependency tree")?;
+
+    let (aur_count, repo_count) = graph.counts();
+    println!(
+        "  {} AUR package(s) to scan, {} repo/virtual dependencies",
+        aur_count.to_string().bold(),
+        repo_count
+    );
+    if !graph.truncated.is_empty() {
+        println!(
+            "  {} tree truncated at depth/size cap for: {}",
+            "note:".yellow(),
+            graph.truncated.join(", ")
+        );
+    }
+    println!();
+
+    // 2. Scan every AUR node (the untrusted set).
+    let mut scans: BTreeMap<String, ComponentScan> = BTreeMap::new();
+    let mut total_critical = 0usize;
+    let mut total_high = 0usize;
+    let mut fetch_failures: Vec<String> = Vec::new();
+
+    for node in graph.aur_packages() {
+        // Prefer the exact on-disk PKGBUILD when the package was provided via
+        // --local: that is the same content the build will use (no TOCTOU).
+        let local_pkgbuild = local_dir_by_name.get(&node.name).map(|d| d.join("PKGBUILD"));
+        let origin = if local_pkgbuild.is_some() { "local" } else { "aur" };
+        print!("{} {} {} ", "Scanning:".dimmed(), node.name.white(), format!("({origin})").dimmed());
+        io::stdout().flush().ok();
+
+        let scan_path = match &local_pkgbuild {
+            Some(p) => Ok(p.clone()),
+            None => client
+                .fetch_pkgbuild(&node.name)
+                .await
+                .map(|f| f.pkgbuild_path)
+                .map_err(|e| format!("fetch error: {e}")),
+        };
+        let result = match scan_path {
+            Ok(path) => scanner.scan_pkgbuild(&path).await.map_err(|e| format!("scan error: {e}")),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(result) => {
+                let scan = ComponentScan::from_findings(&result.findings);
+                total_critical += scan.critical;
+                total_high += scan.high;
+                if scan.critical > 0 || scan.high > 0 {
+                    println!("{}", format!("{}C/{}H", scan.critical, scan.high).red());
+                } else {
+                    println!("{}", "ok".green());
+                }
+                print_findings_for(&node.name, &result.findings, args.min_severity);
+                scans.insert(node.name.clone(), scan);
+            }
+            Err(e) => {
+                println!("{}", e.red());
+                fetch_failures.push(node.name.clone());
+            }
+        }
+    }
+
+    // 3. Render the reviewable tree.
+    println!();
+    println!("{}", "Dependency tree (review before installing):".cyan().bold());
+    print!("{}", sbom::render_tree(&graph, &scans));
+    print_orphans(&graph);
+
+    // Loudly call out opaque boundaries: packages that fetch/run external code.
+    // The scanner intentionally does NOT follow these, so their real behavior
+    // is unknown -- this is the "it's trying to run something from <url>" case.
+    let opaque: Vec<(&String, &ComponentScan)> =
+        scans.iter().filter(|(_, s)| s.opaque).collect();
+    if !opaque.is_empty() {
+        println!();
+        println!(
+            "{}",
+            "OPAQUE BOUNDARY - these packages run code fetched from outside any package:"
+                .red()
+                .bold()
+        );
+        for (pkg, scan) in &opaque {
+            let urls = if scan.remote_urls.is_empty() {
+                "an external source".to_string()
+            } else {
+                scan.remote_urls.join(", ")
+            };
+            println!("  {} runs code from {}", pkg.red().bold(), urls.yellow());
+        }
+        println!(
+            "  {}",
+            "The scanner does not follow these. What they run is unknown -- you likely do not want this."
+                .red()
+        );
+    }
+    println!();
+
+    // 4. Emit the SBOM if requested.
+    if let Some(path) = &args.sbom_path {
+        let bom = sbom::to_cyclonedx(
+            &graph,
+            &scans,
+            env!("CARGO_PKG_VERSION"),
+            &sbom::new_serial(),
+            &sbom::now_timestamp(),
+        );
+        let json = serde_json::to_string_pretty(&bom)?;
+        std::fs::write(path, json).with_context(|| format!("writing SBOM to {}", path.display()))?;
+        println!("{} CycloneDX SBOM written to {}", "SBOM:".green().bold(), path.display());
+        println!();
+    }
+
+    // 5. Summary.
+    println!("{}", "=".repeat(60));
+    print!("Tree totals: ");
+    if total_critical > 0 {
+        print!("{} ", format!("{total_critical} CRITICAL").red().bold());
+    }
+    if total_high > 0 {
+        print!("{} ", format!("{total_high} HIGH").yellow().bold());
+    }
+    if total_critical == 0 && total_high == 0 {
+        print!("{}", "no critical/high findings".green());
+    }
+    println!();
+    if !fetch_failures.is_empty() {
+        println!(
+            "{} could not fetch/scan: {} (treat as unreviewed)",
+            "warning:".yellow(),
+            fetch_failures.join(", ")
+        );
+    }
+
+    // 6. Decide pass/fail.
+    let mut failed = false;
+    if let Some(threshold) = args.fail_on {
+        let tripped = match threshold {
+            Severity::Critical => total_critical > 0,
+            _ => total_critical + total_high > 0,
+        };
+        if tripped {
+            failed = true;
+        }
+    }
+
+    if args.interactive && (total_critical > 0 || total_high > 0) {
+        println!();
+        if total_critical > 0 {
+            println!("{}", "WARNING: Critical security issues in the dependency tree!".red().bold());
+        }
+        print!("{} ", "Proceed with installation? [y/N]:".yellow().bold());
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("{}", "Installation aborted by user.".yellow());
+            failed = true;
+        } else {
+            println!("{}", "User accepted risks, proceeding...".dimmed());
+        }
+    }
+
+    if failed {
+        anyhow::bail!("Security issues detected or user aborted");
+    }
+    Ok(())
+}
+
+fn print_findings_for(pkg: &str, findings: &[aur_scanner_core::Finding], min: Option<Severity>) {
+    for f in findings
+        .iter()
+        .filter(|f| min.map(|m| f.severity <= m).unwrap_or(f.severity <= Severity::High))
+    {
+        println!("    {} {} [{}] {}", "·".dimmed(), pkg.dimmed(), f.severity, f.title);
     }
 }
 
-fn print_package_info(info: &aur_scanner_core::aur::AurPackageInfo) {
-    println!(
-        "  {} {} {}",
-        "Package:".dimmed(),
-        info.name.white().bold(),
-        format!("v{}", info.version).dimmed()
-    );
-
-    if let Some(ref desc) = info.description {
-        println!("  {} {}", "Description:".dimmed(), desc);
-    }
-
-    if let Some(ref maintainer) = info.maintainer {
-        println!("  {} {}", "Maintainer:".dimmed(), maintainer);
-    } else {
+fn print_orphans(graph: &DependencyGraph) {
+    let orphans: Vec<&str> = graph
+        .nodes
+        .values()
+        .filter(|n| n.source == PackageSource::Aur && n.orphaned)
+        .map(|n| n.name.as_str())
+        .collect();
+    if !orphans.is_empty() {
         println!(
-            "  {} {}",
-            "Maintainer:".dimmed(),
-            "ORPHAN (no maintainer!)".red().bold()
+            "  {} orphaned AUR package(s) in tree (higher hijack risk): {}",
+            "note:".yellow(),
+            orphans.join(", ")
         );
-    }
-
-    if let Some(votes) = info.num_votes {
-        let popularity = info.popularity.unwrap_or(0.0);
-        println!(
-            "  {} {} votes, {:.2} popularity",
-            "Votes:".dimmed(),
-            votes,
-            popularity
-        );
-    }
-
-    if info.out_of_date.is_some() {
-        println!(
-            "  {} {}",
-            "Status:".dimmed(),
-            "OUT OF DATE".yellow().bold()
-        );
-    }
-
-    // Check for warning signs
-    let mut warnings = Vec::new();
-
-    if info.maintainer.is_none() {
-        warnings.push("Package is orphaned - higher risk of malicious takeover");
-    }
-
-    if let Some(votes) = info.num_votes {
-        if votes < 5 {
-            warnings.push("Very few votes - package may be new or unknown");
-        }
-    }
-
-    if let Some(popularity) = info.popularity {
-        if popularity < 0.1 {
-            warnings.push("Low popularity - limited community vetting");
-        }
-    }
-
-    if !warnings.is_empty() {
-        println!();
-        println!("  {}", "Warnings:".yellow().bold());
-        for warning in warnings {
-            println!("  {} {}", "-".yellow(), warning.yellow());
-        }
     }
 }

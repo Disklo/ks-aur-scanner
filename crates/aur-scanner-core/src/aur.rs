@@ -16,7 +16,7 @@ const AUR_RPC_URL: &str = "https://aur.archlinux.org/rpc/v5";
 const AUR_GIT_URL: &str = "https://aur.archlinux.org";
 
 /// Information about an AUR package from the RPC API
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 pub struct AurPackageInfo {
     #[serde(rename = "Name")]
     pub name: String,
@@ -38,6 +38,21 @@ pub struct AurPackageInfo {
     pub last_modified: Option<i64>,
     #[serde(rename = "PackageBase")]
     pub package_base: String,
+    /// Runtime dependencies (may carry version constraints).
+    #[serde(rename = "Depends", default)]
+    pub depends: Vec<String>,
+    /// Build-time dependencies.
+    #[serde(rename = "MakeDepends", default)]
+    pub make_depends: Vec<String>,
+    /// Test-time dependencies.
+    #[serde(rename = "CheckDepends", default)]
+    pub check_depends: Vec<String>,
+    /// Optional dependencies (may carry ": description").
+    #[serde(rename = "OptDepends", default)]
+    pub opt_depends: Vec<String>,
+    /// Virtual names this package provides.
+    #[serde(rename = "Provides", default)]
+    pub provides: Vec<String>,
 }
 
 /// RPC API response wrapper
@@ -143,6 +158,54 @@ impl AurClient {
         Ok(response.results)
     }
 
+    /// Clone an AUR package's git repository into `dest` (an existing, empty
+    /// directory), with full hardening against repo-side code execution and
+    /// option/protocol abuse. The same routine backs both scanning and the
+    /// race-free build path, so the bytes built are the bytes scanned.
+    ///
+    /// Hardening:
+    ///  - core.hooksPath=/dev/null : never run hooks from the clone
+    ///  - protocol.{file,ext}.allow=never : block file:// and ext:: vectors
+    ///  - core.symlinks=false : write symlinks as plain files (no escape)
+    ///  - --no-recurse-submodules : never fetch/initialize submodules
+    ///  - GIT_TERMINAL_PROMPT=0 : never block on a credential prompt
+    ///  - `--` before the URL : the URL can never be parsed as an option
+    pub async fn clone_repo(&self, package_base: &str, dest: &Path) -> Result<()> {
+        let git_url = format!("{}/{}.git", AUR_GIT_URL, package_base);
+        debug!("Cloning {} into {}", git_url, dest.display());
+        let output = tokio::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "protocol.file.allow=never",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "core.symlinks=false",
+                "clone",
+                "--depth=1",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                &git_url,
+                ".",
+            ])
+            .current_dir(dest)
+            .output()
+            .await
+            .map_err(|e| {
+                ScanError::Io(std::io::Error::other(format!("Failed to run git: {}", e)))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ScanError::Network(format!("Failed to clone AUR repo: {}", stderr)));
+        }
+        Ok(())
+    }
+
     /// Fetch PKGBUILD by cloning the AUR git repository
     pub async fn fetch_pkgbuild(&self, package_name: &str) -> Result<FetchedPackage> {
         // First get package info to find the package base
@@ -156,26 +219,8 @@ impl AurClient {
                 format!("Failed to create temp directory: {}", e),
             )))?;
 
-        // Clone the AUR git repo
-        let git_url = format!("{}/{}.git", AUR_GIT_URL, info.package_base);
-        debug!("Cloning from: {}", git_url);
-
-        let output = tokio::process::Command::new("git")
-            .args(["clone", "--depth=1", &git_url, "."])
-            .current_dir(temp_dir.path())
-            .output()
-            .await
-            .map_err(|e| ScanError::Io(std::io::Error::other(
-                format!("Failed to run git: {}", e),
-            )))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ScanError::Network(format!(
-                "Failed to clone AUR repo: {}",
-                stderr
-            )));
-        }
+        // Clone the AUR git repo into the temp directory (hardened).
+        self.clone_repo(&info.package_base, temp_dir.path()).await?;
 
         let pkgbuild_path = temp_dir.path().join("PKGBUILD");
         if !pkgbuild_path.exists() {
@@ -244,6 +289,22 @@ impl Default for AurClient {
     }
 }
 
+/// Abstract source of AUR package metadata, so dependency resolution can be
+/// unit-tested without network access.
+#[async_trait::async_trait]
+pub trait PackageInfoSource: Send + Sync {
+    /// Batch-fetch info for `names`. Names that are not AUR packages (official
+    /// repo or virtual) are simply absent from the returned vector.
+    async fn info_batch(&self, names: &[&str]) -> Result<Vec<AurPackageInfo>>;
+}
+
+#[async_trait::async_trait]
+impl PackageInfoSource for AurClient {
+    async fn info_batch(&self, names: &[&str]) -> Result<Vec<AurPackageInfo>> {
+        self.get_multiple_info(names).await
+    }
+}
+
 /// Find install script in a package directory
 fn find_install_script(dir: &Path, package_base: &str) -> Option<PathBuf> {
     // Common patterns for install scripts
@@ -268,6 +329,14 @@ fn find_install_script(dir: &Path, package_base: &str) -> Option<PathBuf> {
                 let install_file = install_file
                     .trim()
                     .trim_matches(|c| c == '\'' || c == '"');
+                // Only accept a bare filename inside `dir`; reject traversal so a
+                // hostile install= value cannot escape the package directory.
+                if install_file.is_empty()
+                    || install_file.contains('/')
+                    || install_file.contains("..")
+                {
+                    continue;
+                }
                 let path = dir.join(install_file);
                 if path.exists() {
                     return Some(path);
@@ -282,8 +351,9 @@ fn find_install_script(dir: &Path, package_base: &str) -> Option<PathBuf> {
 /// Check if a package is from AUR (not in official repos)
 pub async fn is_aur_package(package_name: &str) -> Result<bool> {
     // Check if it's in official repos using pacman
+    // `--` ensures a name that begins with `-` can never be parsed as a flag.
     let output = tokio::process::Command::new("pacman")
-        .args(["-Si", package_name])
+        .args(["-Si", "--", package_name])
         .output()
         .await
         .map_err(ScanError::Io)?;

@@ -85,8 +85,7 @@ enum Commands {
 
     /// Check an AUR package BEFORE installation (fetches from AUR)
     Check {
-        /// Package name(s) to check
-        #[arg(required = true)]
+        /// Package name(s) to check (optional if --local dirs are given)
         packages: Vec<String>,
 
         /// Skip interactive prompt (don't ask to proceed)
@@ -96,6 +95,55 @@ enum Commands {
         /// Exit with non-zero code if findings at or above this severity
         #[arg(long, value_enum)]
         fail_on: Option<SeverityArg>,
+
+        /// Do not resolve and scan the AUR dependency tree (named packages only)
+        #[arg(long)]
+        no_deps: bool,
+
+        /// Also follow optional dependencies when resolving the tree
+        #[arg(long)]
+        include_optional: bool,
+
+        /// Write a CycloneDX SBOM of the full dependency tree to this path
+        #[arg(long, value_name = "FILE")]
+        sbom: Option<PathBuf>,
+
+        /// Scan these already-fetched package dir(s) from disk (race-free, the
+        /// exact bytes that will be built). Repeatable. Remaining AUR deps are
+        /// fetched from the AUR unless they are also provided here.
+        #[arg(long, value_name = "DIR")]
+        local: Vec<PathBuf>,
+    },
+
+    /// Race-free install: scan the exact bytes, then build them in dep order
+    Install {
+        /// Package name(s) to install
+        #[arg(required = true)]
+        packages: Vec<String>,
+
+        /// Gate threshold: findings at or above this severity block the build
+        #[arg(long, value_enum, default_value = "critical")]
+        gate: SeverityArg,
+
+        /// Also follow optional dependencies
+        #[arg(long)]
+        include_optional: bool,
+
+        /// Pass --noconfirm to makepkg and skip the build prompt
+        #[arg(long)]
+        noconfirm: bool,
+
+        /// Build even if the scan gate trips (deliberate override)
+        #[arg(long)]
+        force: bool,
+
+        /// Workspace dir for clones/builds (default ~/.cache/aur-scan/build)
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+
+        /// Write a CycloneDX SBOM to this path
+        #[arg(long, value_name = "FILE")]
+        sbom: Option<PathBuf>,
     },
 
     /// Scan all installed AUR packages on the system
@@ -131,6 +179,17 @@ enum Commands {
         /// Filter by category
         #[arg(long)]
         category: Option<String>,
+
+        /// Output format: text, markdown, json
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show or query the IOC (indicator of compromise) database
+    Ioc {
+        /// Check whether a name/value matches a known indicator
+        #[arg(long, value_name = "NAME")]
+        check: Option<String>,
     },
 
     /// Check scanner version and configuration
@@ -185,13 +244,41 @@ async fn main() -> Result<()> {
             packages,
             no_confirm,
             fail_on,
+            no_deps,
+            include_optional,
+            sbom,
+            local,
         } => {
-            commands::check::run(
-                packages,
-                cli.severity.map(Into::into),
-                !no_confirm, // interactive = !no_confirm
-                fail_on.map(Into::into),
-            )
+            commands::check::run(commands::check::CheckArgs {
+                package_names: packages,
+                min_severity: cli.severity.map(Into::into),
+                interactive: !no_confirm,
+                fail_on: fail_on.map(Into::into),
+                resolve_deps: !no_deps,
+                include_optional,
+                sbom_path: sbom,
+                local_dirs: local,
+            })
+            .await
+        }
+        Commands::Install {
+            packages,
+            gate,
+            include_optional,
+            noconfirm,
+            force,
+            workspace,
+            sbom,
+        } => {
+            commands::install::run(commands::install::InstallArgs {
+                package_names: packages,
+                fail_on: gate.into(),
+                include_optional,
+                noconfirm,
+                force,
+                workspace,
+                sbom_path: sbom,
+            })
             .await
         }
         Commands::System { rescan, cache_dir } => {
@@ -208,8 +295,11 @@ async fn main() -> Result<()> {
         Commands::Explain { code } => {
             commands::explain::run(&code)
         }
-        Commands::Codes { category } => {
-            commands::codes::run(category.as_deref())
+        Commands::Codes { category, format } => {
+            commands::codes::run(category.as_deref(), &format)
+        }
+        Commands::Ioc { check } => {
+            commands::ioc::run(check.as_deref())
         }
         Commands::Version => {
             commands::version::run();

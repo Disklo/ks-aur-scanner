@@ -11,7 +11,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// A security detection rule
+/// A security detection rule (pattern-based). Community rule files use this
+/// shape; `file_types`/`patterns` default to empty so a rule file is concise.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rule {
     /// Unique identifier (e.g., "DLE-001")
@@ -25,8 +26,10 @@ pub struct Rule {
     /// Category of the rule
     pub category: Category,
     /// Patterns to match
+    #[serde(default)]
     pub patterns: Vec<Pattern>,
     /// File types this rule applies to
+    #[serde(default)]
     pub file_types: Vec<FileType>,
     /// Recommendation for fixing
     pub recommendation: String,
@@ -203,10 +206,18 @@ impl RuleEngine {
     }
 
     /// Add built-in rules
+    ///
+    /// A single rule with a malformed pattern must never silently disable the
+    /// rest of the built-in ruleset (a missed detection is a security failure),
+    /// so a rule that fails to compile is skipped with a warning rather than
+    /// aborting the whole load.
     pub fn add_builtin_rules(&mut self) -> Result<()> {
         let builtin_rules = get_builtin_rules();
         for rule in builtin_rules {
-            self.add_rule(rule)?;
+            let rule_id = rule.id.clone();
+            if let Err(e) = self.add_rule(rule) {
+                tracing::warn!("skipping built-in rule {rule_id}: failed to compile: {e}");
+            }
         }
         Ok(())
     }
@@ -221,12 +232,17 @@ impl RuleEngine {
         };
 
         let lines: Vec<&str> = content.lines().collect();
+        // Lines that are informational text printed to the user (the body of a
+        // non-redirected heredoc, e.g. a `cat <<EOF` post_install message) are
+        // not executed, so path-presence rules must not match them. A redirected
+        // heredoc (`<<EOF > file`) writes content and is still scanned.
+        let informational = informational_lines(&lines);
 
         for compiled in rules {
             for (line_idx, line) in lines.iter().enumerate() {
-                // Skip pure comment lines (start with # after trimming whitespace)
+                // Skip pure comment lines and printed heredoc message bodies.
                 let trimmed = line.trim();
-                if trimmed.starts_with('#') {
+                if trimmed.starts_with('#') || informational[line_idx] {
                     continue;
                 }
 
@@ -288,12 +304,97 @@ impl Default for RuleEngine {
     fn default() -> Self {
         let mut engine = Self::new();
         let _ = engine.add_builtin_rules();
+        // Load community rule files so user-contributed detections actually run
+        // (the same directories the catalog indexes). A malformed file warns and
+        // is skipped; it never breaks the engine.
+        for dir in user_rule_dirs() {
+            if dir.is_dir() {
+                if let Err(e) = engine.load_rules_from_dir(&dir) {
+                    tracing::warn!("failed to load community rules from {}: {}", dir.display(), e);
+                }
+            }
+        }
         engine
     }
 }
 
-/// Get built-in security rules
-fn get_builtin_rules() -> Vec<Rule> {
+/// Standard directories users/distros can drop community rule TOML files into.
+pub fn user_rule_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/usr/share/aur-scanner/rules.d"),
+        std::path::PathBuf::from("/etc/aur-scanner/rules.d"),
+    ];
+    if let Some(cfg) = dirs::config_dir() {
+        dirs.push(cfg.join("aur-scanner/rules.d"));
+    }
+    dirs
+}
+
+/// Flag each line that is the body of a non-redirected heredoc (printed text,
+/// not executed code), so path/string-presence rules don't match user messages.
+fn informational_lines(lines: &[&str]) -> Vec<bool> {
+    let mut flags = vec![false; lines.len()];
+    let mut terminator: Option<String> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(delim) = &terminator {
+            flags[i] = true; // inside a printed heredoc body
+            if line.trim() == delim.as_str() {
+                terminator = None;
+            }
+            continue;
+        }
+        if let Some(delim) = heredoc_message_delim(line) {
+            terminator = Some(delim);
+        }
+    }
+    flags
+}
+
+/// If `line` opens a heredoc that just prints a message (no redirection to a
+/// file), return its terminator delimiter. Redirected heredocs write content
+/// somewhere and must still be scanned, so they return `None`.
+fn heredoc_message_delim(line: &str) -> Option<String> {
+    let pos = line.find("<<")?;
+    let rest = line[pos + 2..].strip_prefix('-').unwrap_or(&line[pos + 2..]).trim_start();
+    let bytes = rest.as_bytes();
+    let quote = match bytes.first() {
+        Some(&b'"') | Some(&b'\'') => Some(bytes[0]),
+        _ => None,
+    };
+    let mut i = if quote.is_some() { 1 } else { 0 };
+    let start = i;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) if c == q => break,
+            Some(_) => i += 1,
+            None if c.is_ascii_alphanumeric() || c == b'_' => i += 1,
+            None => break,
+        }
+    }
+    if i == start {
+        return None;
+    }
+    let delim = &rest[start..i];
+    // `$((x << 2))` is an arithmetic shift, not a heredoc.
+    if quote.is_none() && delim.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    // Redirected to a file (`> f`, `>> f`, `| tee f`)? Then it writes content
+    // and the body must be scanned.
+    let redirected = line.contains(">>")
+        || line[..pos].contains('>')
+        || rest[i..].contains('>')
+        || line.contains("tee ");
+    if redirected {
+        return None;
+    }
+    Some(delim.to_string())
+}
+
+/// Get built-in security rules (pattern-based). Public so the catalog can
+/// index them as the single source of truth.
+pub fn get_builtin_rules() -> Vec<Rule> {
     vec![
         // ============================================================
         // CRITICAL: Download and Execute (from real-world attacks)
@@ -580,61 +681,10 @@ fn get_builtin_rules() -> Vec<Rule> {
             enabled: true,
         },
 
-        // ============================================================
-        // CRITICAL: Privilege Escalation
-        // ============================================================
-        Rule {
-            id: "PRIV-001".to_string(),
-            name: "Sudo in build function".to_string(),
-            description: "Build functions should never require sudo".to_string(),
-            severity: Severity::Critical,
-            category: Category::PrivilegeEscalation,
-            patterns: vec![Pattern::Regex {
-                pattern: r"\bsudo\b".to_string(),
-            }],
-            file_types: vec![FileType::Pkgbuild],
-            recommendation: "Remove sudo from build/package functions".to_string(),
-            cwe_id: Some("CWE-250".to_string()),
-            enabled: true,
-        },
-        Rule {
-            id: "PRIV-002".to_string(),
-            name: "SUID/SGID bit setting".to_string(),
-            description: "Setting SUID/SGID bits can enable privilege escalation".to_string(),
-            severity: Severity::Critical,
-            category: Category::PrivilegeEscalation,
-            patterns: vec![
-                Pattern::Regex {
-                    pattern: r"chmod\s+[0-7]*[4-7][0-7]{2}\s+".to_string(),
-                },
-                Pattern::Regex {
-                    pattern: r"chmod\s+[ugo]*\+s".to_string(),
-                },
-            ],
-            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
-            recommendation: "SUID/SGID bits should rarely be set; review carefully".to_string(),
-            cwe_id: Some("CWE-250".to_string()),
-            enabled: true,
-        },
-        Rule {
-            id: "PRIV-003".to_string(),
-            name: "Sudoers modification".to_string(),
-            description: "Modifying sudoers can enable permanent privilege escalation".to_string(),
-            severity: Severity::Critical,
-            category: Category::PrivilegeEscalation,
-            patterns: vec![
-                Pattern::Regex {
-                    pattern: r"/etc/sudoers".to_string(),
-                },
-                Pattern::Regex {
-                    pattern: r"visudo".to_string(),
-                },
-            ],
-            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
-            recommendation: "Packages should never modify sudoers".to_string(),
-            cwe_id: Some("CWE-250".to_string()),
-            enabled: true,
-        },
+        // NOTE: privilege escalation (PRIV-001..006: sudo, SUID/SGID, sudoers,
+        // capabilities, kernel modules, install-hook sudo) is owned by the
+        // privilege analyzer (privilege.rs), which is function-aware. It is not
+        // duplicated as pattern rules, to keep each finding ID single-owner.
 
         // ============================================================
         // CRITICAL: Install Script Execution (CHAOS RAT attack vector)
@@ -1086,68 +1136,12 @@ fn get_builtin_rules() -> Vec<Rule> {
             cwe_id: None,
             enabled: true,
         },
-        Rule {
-            id: "SRC-001".to_string(),
-            name: "Suspicious git source".to_string(),
-            description: "Git sources from non-standard hosting. CHAOS RAT used attacker's GitHub.".to_string(),
-            severity: Severity::Medium,
-            category: Category::NetworkSecurity,
-            patterns: vec![
-                Pattern::Regex {
-                    pattern: r"git\+https?://(?!github\.com|gitlab\.com|codeberg\.org|bitbucket\.org|sr\.ht|git\.kernel\.org)".to_string(),
-                },
-            ],
-            file_types: vec![FileType::Pkgbuild],
-            recommendation: "Verify git sources are from trusted hosting providers".to_string(),
-            cwe_id: None,
-            enabled: true,
-        },
-
-        // ============================================================
-        // MEDIUM: Weak Checksums and Integrity
-        // ============================================================
-        Rule {
-            id: "CHKSUM-001".to_string(),
-            name: "MD5 checksum".to_string(),
-            description: "MD5 is cryptographically broken".to_string(),
-            severity: Severity::Medium,
-            category: Category::Cryptography,
-            patterns: vec![Pattern::Regex {
-                pattern: r"^md5sums=".to_string(),
-            }],
-            file_types: vec![FileType::Pkgbuild],
-            recommendation: "Use sha256sums or stronger".to_string(),
-            cwe_id: Some("CWE-328".to_string()),
-            enabled: true,
-        },
-        Rule {
-            id: "CHKSUM-002".to_string(),
-            name: "SHA1 checksum".to_string(),
-            description: "SHA1 is cryptographically weak".to_string(),
-            severity: Severity::Medium,
-            category: Category::Cryptography,
-            patterns: vec![Pattern::Regex {
-                pattern: r"^sha1sums=".to_string(),
-            }],
-            file_types: vec![FileType::Pkgbuild],
-            recommendation: "Use sha256sums or stronger".to_string(),
-            cwe_id: Some("CWE-328".to_string()),
-            enabled: true,
-        },
-        Rule {
-            id: "NET-001".to_string(),
-            name: "HTTP source URL".to_string(),
-            description: "Source downloaded over insecure HTTP".to_string(),
-            severity: Severity::Medium,
-            category: Category::NetworkSecurity,
-            patterns: vec![Pattern::Regex {
-                pattern: r#"source=\([^)]*http://[^)]*\)"#.to_string(),
-            }],
-            file_types: vec![FileType::Pkgbuild],
-            recommendation: "Use HTTPS for all source downloads".to_string(),
-            cwe_id: Some("CWE-319".to_string()),
-            enabled: true,
-        },
+        // NOTE: insecure transport (git://, git+http://, http://, ftp://) and
+        // weak checksums (md5/sha1) are intentionally NOT pattern rules. They
+        // are owned by the source analyzer (SRC-001) and checksum analyzer
+        // (CHK-002/CHK-003) respectively, which parse the source/checksum arrays
+        // structurally. Keeping a single owner per concept keeps finding IDs
+        // unique and auditable (see the `catalog` module).
 
         // ============================================================
         // HIGH: Hidden Files and Suspicious Paths
@@ -1287,6 +1281,66 @@ fn get_builtin_rules() -> Vec<Rule> {
             cwe_id: None,
             enabled: true,
         },
+
+        // ============================================================
+        // CRITICAL: "Atomic Arch" supply-chain campaign (June 2026)
+        // Orphaned AUR packages were adopted and their PKGBUILD/install
+        // hooks modified to pull malicious npm/bun packages
+        // (atomic-lockfile, js-digest, lockfile-js) that drop a
+        // credential stealer and an eBPF rootkit (scales.bpf.c).
+        // ============================================================
+        Rule {
+            id: "ATOMIC-001".to_string(),
+            name: "Atomic Arch malicious npm/bun package".to_string(),
+            description: "References a known-malicious package from the June 2026 'Atomic Arch' AUR supply-chain campaign (atomic-lockfile, js-digest, lockfile-js). These pull an infostealer and eBPF rootkit during the build/install phase.".to_string(),
+            severity: Severity::Critical,
+            category: Category::MaliciousCode,
+            patterns: vec![Pattern::Regex {
+                pattern: r"\b(atomic-lockfile|js-digest|lockfile-js)\b".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Do NOT build. This is a known-malicious dependency. Remove the package and treat the host as compromised: rotate credentials (SSH, npm/GitHub tokens, browser sessions).".to_string(),
+            cwe_id: Some("CWE-506".to_string()),
+            enabled: true,
+        },
+        Rule {
+            id: "ATOMIC-002".to_string(),
+            name: "Node/Bun package manager in install hook".to_string(),
+            description: "Invokes npm/pnpm/yarn/bun to install packages from an install hook. The June 2026 'Atomic Arch' campaign added post-install hooks running `npm install atomic-lockfile` / `bun install js-digest`. Legitimate packages never fetch npm/bun packages during the install phase.".to_string(),
+            severity: Severity::Critical,
+            category: Category::MaliciousCode,
+            patterns: vec![
+                Pattern::Regex {
+                    pattern: r"\b(npm|pnpm|yarn)\s+(install|add|i)\b".to_string(),
+                },
+                Pattern::Regex {
+                    pattern: r"\bbunx?\s+(install|add|i|x)\b".to_string(),
+                },
+            ],
+            file_types: vec![FileType::InstallScript],
+            recommendation: "Install scripts must never fetch or install npm/bun packages. Inspect the PKGBUILD diff and report the package to the AUR maintainers.".to_string(),
+            cwe_id: Some("CWE-494".to_string()),
+            enabled: true,
+        },
+        Rule {
+            id: "ATOMIC-003".to_string(),
+            name: "eBPF rootkit / payload artifact".to_string(),
+            description: "References the eBPF rootkit object (scales.bpf.c) or the 'deps' hook path used by the June 2026 'Atomic Arch' payload to gain rootkit-like capabilities and hide itself.".to_string(),
+            severity: Severity::Critical,
+            category: Category::Persistence,
+            patterns: vec![
+                Pattern::Regex {
+                    pattern: r"scales\.bpf\.c".to_string(),
+                },
+                Pattern::Regex {
+                    pattern: r"src/hooks/deps\b".to_string(),
+                },
+            ],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "This is a rootkit dropper artifact. Do not build; treat the host as compromised and reinstall rather than clean.".to_string(),
+            cwe_id: Some("CWE-506".to_string()),
+            enabled: true,
+        },
     ]
 }
 
@@ -1298,6 +1352,23 @@ mod tests {
     fn test_builtin_rules() {
         let engine = RuleEngine::default();
         assert!(engine.rule_count() > 0);
+    }
+
+    #[test]
+    fn test_all_builtin_rules_compile() {
+        // Regression guard: every built-in rule must compile and load. A bad
+        // pattern previously aborted the whole load via `?`, silently disabling
+        // every rule defined after it. Assert the full set is present.
+        let expected = get_builtin_rules();
+        let engine = RuleEngine::default();
+        for rule in &expected {
+            assert!(
+                engine.get_rule(&rule.id).is_some(),
+                "built-in rule {} failed to load (bad regex?)",
+                rule.id
+            );
+        }
+        assert_eq!(engine.rule_count(), expected.len());
     }
 
     #[test]
@@ -1323,5 +1394,71 @@ mod tests {
         let content = "make && make install";
         let matches = engine.match_content(content, FileType::Pkgbuild);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_heredoc_message_not_flagged() {
+        // A post_install message printed via `cat <<EOF` mentions ~/.zshrc but
+        // does not modify it; ENV-003/HIDDEN-001 must not fire.
+        let engine = RuleEngine::default();
+        let content = "post_install() {\n    cat << EOF\nAdd this to ~/.zshrc:\n    source /usr/share/x.zsh\nEOF\n}";
+        let matches = engine.match_content(content, FileType::InstallScript);
+        assert!(
+            !matches.iter().any(|m| m.rule_id == "ENV-003" || m.rule_id == "HIDDEN-001"),
+            "heredoc message should not trigger path rules: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn test_redirected_heredoc_still_scanned() {
+        // Writing into ~/.zshrc via a redirected heredoc IS a real modification.
+        let engine = RuleEngine::default();
+        let content = "cat <<EOF >> ~/.zshrc\nsource /tmp/evil\nEOF";
+        let matches = engine.match_content(content, FileType::InstallScript);
+        assert!(matches.iter().any(|m| m.rule_id == "ENV-003"));
+    }
+
+    #[test]
+    fn test_match_atomic_malicious_package() {
+        let engine = RuleEngine::default();
+        // Wave 1 (npm) and wave 2 (bun) IOC package names.
+        for content in [
+            "npm install atomic-lockfile",
+            "bun install js-digest",
+            "yarn add lockfile-js",
+        ] {
+            let matches = engine.match_content(content, FileType::Pkgbuild);
+            assert!(
+                matches.iter().any(|m| m.rule_id == "ATOMIC-001"),
+                "expected ATOMIC-001 for: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_match_atomic_pkgmanager_in_install_hook() {
+        let engine = RuleEngine::default();
+        let content = "post_install() {\n    npm install atomic-lockfile\n}";
+        let matches = engine.match_content(content, FileType::InstallScript);
+        assert!(matches.iter().any(|m| m.rule_id == "ATOMIC-002"));
+        // bun variant
+        let matches = engine.match_content("bun install js-digest", FileType::InstallScript);
+        assert!(matches.iter().any(|m| m.rule_id == "ATOMIC-002"));
+    }
+
+    #[test]
+    fn test_match_atomic_ebpf_artifact() {
+        let engine = RuleEngine::default();
+        let matches = engine.match_content("clang -O2 -target bpf -c scales.bpf.c", FileType::Pkgbuild);
+        assert!(matches.iter().any(|m| m.rule_id == "ATOMIC-003"));
+    }
+
+    #[test]
+    fn test_atomic_no_false_positive_on_legit_node_build() {
+        let engine = RuleEngine::default();
+        // npm in a PKGBUILD build() is common for legit node packages and must
+        // NOT trigger ATOMIC-002 (which is scoped to install scripts only).
+        let matches = engine.match_content("npm install --offline", FileType::Pkgbuild);
+        assert!(!matches.iter().any(|m| m.rule_id == "ATOMIC-002"));
     }
 }

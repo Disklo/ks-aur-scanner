@@ -70,7 +70,7 @@ pub fn status_fail() -> String {
 
 /// Print a progress indicator
 pub fn progress(current: usize, total: usize, item: &str) {
-    let pct = if total > 0 { (current * 100) / total } else { 0 };
+    let pct = (current * 100).checked_div(total).unwrap_or(0);
     print!("\r{} [{}/{}] {}...",
            format!("{}%", pct).cyan(),
            current,

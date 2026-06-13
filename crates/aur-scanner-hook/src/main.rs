@@ -17,13 +17,20 @@ async fn main() -> Result<()> {
         .without_time()
         .init();
 
-    // Load configuration
+    // Load configuration. A present-but-malformed security config is a hard
+    // error: failing closed is safer than silently scanning with defaults.
     let config_path = PathBuf::from("/etc/aur-scanner/config.toml");
-    let config = if config_path.exists() {
-        // TODO: Load from file
-        ScanConfig::default()
-    } else {
-        ScanConfig::default()
+    let config = match ScanConfig::from_toml_file_or_default(&config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "{} invalid config at {}: {}",
+                "aur-scanner:".red().bold(),
+                config_path.display(),
+                e
+            );
+            std::process::exit(2);
+        }
     };
 
     let scanner = Scanner::new(config)?;

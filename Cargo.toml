@@ -8,13 +8,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "1.0.0"
 edition = "2021"
 authors = ["Kief Studio <packages@kief.studio>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/KiefStudioMA/ks-aur-scanner"
-homepage = "https://kief.studio"
-documentation = "https://github.com/KiefStudioMA/ks-aur-scanner#readme"
+homepage = "https://aur-scanner.kief.studio"
+documentation = "https://aur-scanner.kief.studio"
 readme = "README.md"
 keywords = ["aur", "arch-linux", "security", "malware-detection", "pkgbuild"]
 categories = ["command-line-utilities", "development-tools"]
@@ -63,7 +63,7 @@ sha2 = "0.10"
 base64 = "0.22"
 
 # Internal crates
-aur-scanner-core = { version = "0.1.1", path = "crates/aur-scanner-core" }
+aur-scanner-core = { version = "1.0.0", path = "crates/aur-scanner-core" }
 
 [profile.release]
 lto = true

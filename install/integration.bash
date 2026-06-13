@@ -40,6 +40,14 @@ paru() {
     done
 
     if [[ "$is_sync" == "1" ]] && [[ ${#packages[@]} -gt 0 ]]; then
+        # Race-free mode: scan the exact bytes, then build them in dep order
+        # (replaces the helper for the named AUR packages). Opt in with
+        # AUR_SCAN_MODE=install.
+        if [[ "${AUR_SCAN_MODE:-gate}" == "install" ]]; then
+            aur-scan install "${packages[@]}"
+            return $?
+        fi
+
         echo "AUR Security Scanner: Pre-checking packages..."
 
         local scan_args=("--severity" "$AUR_SCAN_SEVERITY")
@@ -76,6 +84,14 @@ yay() {
     done
 
     if [[ "$is_sync" == "1" ]] && [[ ${#packages[@]} -gt 0 ]]; then
+        # Race-free mode: scan the exact bytes, then build them in dep order
+        # (replaces the helper for the named AUR packages). Opt in with
+        # AUR_SCAN_MODE=install.
+        if [[ "${AUR_SCAN_MODE:-gate}" == "install" ]]; then
+            aur-scan install "${packages[@]}"
+            return $?
+        fi
+
         echo "AUR Security Scanner: Pre-checking packages..."
 
         local scan_args=("--severity" "$AUR_SCAN_SEVERITY")
@@ -100,6 +116,8 @@ aur-scan-system() {
 }
 
 echo "AUR Security Scanner: Shell integration loaded."
-echo "  - paru and yay will auto-scan before installing AUR packages"
+echo "  - paru and yay auto-scan before installing AUR packages"
+echo "  - AUR_SCAN_MODE=install : race-free (scan the exact bytes, then build)"
+echo "  - AUR_SCAN_MODE=gate (default) : scan, then hand off to the helper"
 echo "  - Use 'paru-unsafe' or 'yay-unsafe' to bypass scanning"
 echo "  - Set AUR_SCAN_ENABLED=0 to disable globally"

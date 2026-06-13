@@ -1,0 +1,26 @@
+# Maintainer: hijacked <attacker@evil.example>
+# June 2026 "Atomic Arch" supply-chain campaign style.
+# An orphaned package adopted and modified to pull a malicious npm/bun
+# payload (atomic-lockfile / js-digest) via an install hook.
+
+pkgname=alvr
+pkgver=20.0.0
+pkgrel=1
+pkgdesc="ALVR - stream VR games from PC to headset"
+arch=('x86_64')
+url="https://github.com/alvr-org/ALVR"
+license=('MIT')
+depends=('glibc')
+install="${pkgname}.install"
+source=("https://github.com/alvr-org/ALVR/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "ALVR-${pkgver}"
+    cargo build --release
+}
+
+package() {
+    cd "ALVR-${pkgver}"
+    install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
+}

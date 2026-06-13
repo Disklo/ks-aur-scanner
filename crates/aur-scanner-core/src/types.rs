@@ -206,6 +206,28 @@ impl Default for ScanConfig {
     }
 }
 
+impl ScanConfig {
+    /// Load configuration from a TOML file. Returns an error if the file exists
+    /// but cannot be read or parsed (callers decide whether to fall back to
+    /// defaults), so a malformed security config is never silently ignored.
+    pub fn from_toml_file(path: &std::path::Path) -> crate::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let config: ScanConfig = toml::from_str(&text)
+            .map_err(|e| crate::ScanError::Config(format!("{}: {}", path.display(), e)))?;
+        Ok(config)
+    }
+
+    /// Load from `path` if it exists, otherwise return defaults. A present but
+    /// malformed file is a hard error (surfaced to the caller).
+    pub fn from_toml_file_or_default(path: &std::path::Path) -> crate::Result<Self> {
+        if path.exists() {
+            Self::from_toml_file(path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+}
+
 /// Threat intelligence provider configuration
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ThreatIntelConfig {

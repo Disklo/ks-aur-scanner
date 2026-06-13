@@ -35,11 +35,14 @@ impl SecurityAnalyzer for SourceAnalyzer {
         let mut findings = Vec::new();
 
         for (idx, source) in context.pkgbuild.source.iter().enumerate() {
-            // Check for insecure protocols
-            if !source.protocol.is_secure() {
+            // Insecure transport: cleartext protocols (http/ftp) OR unauthenticated
+            // git transports (git://, git+http://), which are tamperable in transit.
+            let lurl = source.url.to_lowercase();
+            let insecure_git = lurl.contains("git://") || lurl.contains("git+http://");
+            if !source.protocol.is_secure() || insecure_git {
                 let severity = match source.protocol {
-                    Protocol::Http => Severity::Medium,
-                    Protocol::Ftp => Severity::Medium,
+                    Protocol::Http | Protocol::Ftp => Severity::Medium,
+                    _ if insecure_git => Severity::Medium,
                     _ => Severity::Low,
                 };
 
@@ -47,9 +50,9 @@ impl SecurityAnalyzer for SourceAnalyzer {
                     id: "SRC-001".to_string(),
                     severity,
                     category: Category::NetworkSecurity,
-                    title: "Insecure source protocol".to_string(),
+                    title: "Insecure source/transport protocol".to_string(),
                     description: format!(
-                        "Source #{} uses insecure protocol: {}",
+                        "Source #{} uses an insecure transport: {}",
                         idx + 1,
                         source.url
                     ),
@@ -161,6 +164,60 @@ impl SecurityAnalyzer for SourceAnalyzer {
                         metadata: serde_json::json!({
                             "url": source.url,
                             "shortener": shortener,
+                        }),
+                    });
+                }
+            }
+
+            // Check for git/VCS sources hosted on non-standard providers.
+            // (Code-based allow-list: the regex rule engine cannot express a
+            // negative host match, so this lives here.)
+            let lurl = source.url.to_lowercase();
+            let is_vcs = matches!(
+                source.protocol,
+                Protocol::Git | Protocol::Svn | Protocol::Hg | Protocol::Bzr
+            ) || lurl.starts_with("git+")
+                || lurl.contains("git+http")
+                || lurl.ends_with(".git");
+            if is_vcs && !lurl.is_empty() {
+                let trusted_vcs_hosts = [
+                    "github.com",
+                    "gitlab.com",
+                    "codeberg.org",
+                    "bitbucket.org",
+                    "sr.ht",
+                    "git.sr.ht",
+                    "git.kernel.org",
+                    "gitlab.freedesktop.org",
+                    "gitlab.gnome.org",
+                    "invent.kde.org",
+                    "salsa.debian.org",
+                    "git.savannah.gnu.org",
+                ];
+                if !trusted_vcs_hosts.iter().any(|h| lurl.contains(h)) {
+                    findings.push(Finding {
+                        id: "SRC-006".to_string(),
+                        severity: Severity::Low,
+                        category: Category::NetworkSecurity,
+                        title: "VCS source from non-standard host".to_string(),
+                        description: format!(
+                            "Source #{} is a VCS checkout from a non-standard host: {}",
+                            idx + 1,
+                            source.url
+                        ),
+                        location: Location {
+                            file: context.file_path.clone(),
+                            line: None,
+                            column: None,
+                            snippet: Some(format!("source=(\"{}\")", source.url)),
+                        },
+                        recommendation:
+                            "Verify the upstream host is the project's official repository."
+                                .to_string(),
+                        cwe_id: None,
+                        metadata: serde_json::json!({
+                            "url": source.url,
+                            "protocol": format!("{:?}", source.protocol),
                         }),
                     });
                 }

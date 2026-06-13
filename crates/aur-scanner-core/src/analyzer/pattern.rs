@@ -127,7 +127,7 @@ impl PatternAnalyzer {
                         || func_body.content.contains(&format!("${}", pattern))
                     {
                         findings.push(Finding {
-                            id: format!("FUNC-{}", pattern.to_uppercase()),
+                            id: "FUNC-001".to_string(),
                             severity: Severity::High,
                             category: Category::NetworkSecurity,
                             title: message.to_string(),

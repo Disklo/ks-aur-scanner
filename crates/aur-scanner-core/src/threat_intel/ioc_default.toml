@@ -1,0 +1,57 @@
+# Built-in IOC (indicators of compromise) database for ks-aur-scanner.
+#
+# DESIGN RULE: only list indicators that are *permanently* malicious wherever
+# they appear -- payload package names, wholly-fake packages, dropped file
+# artifacts, C2 domains, payload hashes. Do NOT list legitimate AUR packages
+# that were transiently hijacked then reverted (e.g. alvr, premake-git):
+# blocklisting a legit package name by string is a false-positive generator.
+# Those hijacks are caught by content rules (ATOMIC-*) and the provenance
+# analyzer instead.
+#
+# This file is embedded at build time. It can be extended/overridden at runtime
+# by dropping a file with the same schema at one of (merged, later wins for
+# campaign metadata; indicator maps are unioned):
+#   /usr/share/aur-scanner/ioc.toml
+#   /etc/aur-scanner/ioc.toml
+#   $XDG_DATA_HOME/aur-scanner/ioc.toml  (default ~/.local/share/aur-scanner/ioc.toml)
+
+schema_version = 1
+updated = "2026-06-13"
+
+[[campaigns]]
+id = "atomic-arch-2026-06"
+name = "Atomic Arch"
+date = "2026-06-11"
+description = "1,500+ orphaned AUR packages were adopted and their PKGBUILD/install hooks modified to pull malicious npm/bun packages that drop a credential stealer and an eBPF rootkit."
+reference = "https://archlinux.org/news/active-aur-malicious-packages-incident/"
+
+[[campaigns]]
+id = "chaos-rat-2025-07"
+name = "CHAOS RAT"
+date = "2025-07"
+description = "Fake browser-fix packages executed Python in post_install to download and install a remote access trojan with systemd persistence."
+reference = ""
+
+# Malicious npm/bun packages pulled during the build/install phase.
+# Unambiguously malicious wherever they are installed from.
+[npm_packages]
+"atomic-lockfile" = "atomic-arch-2026-06"
+"js-digest" = "atomic-arch-2026-06"
+"lockfile-js" = "atomic-arch-2026-06"
+
+# File-name artifacts dropped or compiled by the payload.
+[files]
+"scales.bpf.c" = "atomic-arch-2026-06"
+
+# Wholly-fake packages (malicious by existence, safe to name). These never had
+# a legitimate upstream, unlike hijacked-then-reverted real packages.
+[aur_packages]
+"librewolf-fix-bin" = "chaos-rat-2025-07"
+"firefox-patch-bin" = "chaos-rat-2025-07"
+"zen-browser-patched-bin" = "chaos-rat-2025-07"
+
+# C2 / exfiltration domains. Populate from live feeds.
+[domains]
+
+# SHA-256 hashes of known malicious payloads. Populate from live feeds.
+[sha256]

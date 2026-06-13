@@ -35,10 +35,54 @@ pub async fn run(
     );
     println!();
 
+    // Cross-reference installed package names against the IOC database FIRST.
+    // This catches wholly-malicious packages by name even if their PKGBUILD is
+    // not cached locally -- directly answering "am I affected?".
+    let ioc_db = aur_scanner_core::threat_intel::IocDatabase::load();
+    let name_hits: Vec<(&String, String)> = packages
+        .iter()
+        .filter_map(|p| {
+            ioc_db.match_aur_package(p).map(|cid| {
+                let label = ioc_db
+                    .campaign(cid)
+                    .map(|c| format!("{} ({})", c.name, c.id))
+                    .unwrap_or_else(|| cid.to_string());
+                (p, label)
+            })
+        })
+        .collect();
+    if name_hits.is_empty() {
+        println!(
+            "{} no installed package matches a known-malicious name indicator.",
+            "IOC name check:".green().bold()
+        );
+    } else {
+        println!(
+            "{} {} installed package(s) match known-malicious indicators:",
+            "IOC ALERT:".red().bold(),
+            name_hits.len()
+        );
+        for (pkg, campaign) in &name_hits {
+            println!("  {} -> {}", pkg.red().bold(), campaign);
+        }
+        println!(
+            "  {}",
+            "Remove these immediately and treat the host as compromised.".red()
+        );
+    }
+    println!();
+
     // Determine where to find PKGBUILDs
     let cache_dirs = get_aur_cache_dirs(cache_dir);
 
     let scanner = Scanner::with_defaults().context("Failed to create scanner")?;
+    let mut prov_store = aur_scanner_core::provenance::ProvenanceStore::load(
+        aur_scanner_core::provenance::ProvenanceStore::default_path(),
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("epoch:{}", d.as_secs()))
+        .unwrap_or_default();
     let client = if rescan {
         Some(AurClient::new().context("Failed to create AUR client")?)
     } else {
@@ -103,8 +147,26 @@ pub async fn run(
             continue;
         };
 
-        if let Some(result) = scan_result {
+        if let Some(mut result) = scan_result {
             total_packages += 1;
+
+            // Provenance: flag this package gaining risky behavior since the
+            // last scan (the primary tell of an AUR hijack).
+            let combined = result
+                .scanned_files
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !combined.is_empty() {
+                let anchor = result
+                    .scanned_files
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
+                let prov = prov_store.evaluate(package, &combined, &now, &anchor);
+                result.findings.extend(prov);
+            }
 
             // Filter by severity
             let findings: Vec<_> = result
@@ -151,6 +213,11 @@ pub async fn run(
                 }
             }
         }
+    }
+
+    // Persist provenance baselines for next time.
+    if let Err(e) = prov_store.save() {
+        tracing::warn!("could not save provenance store: {}", e);
     }
 
     // Summary

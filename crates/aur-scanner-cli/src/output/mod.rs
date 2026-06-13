@@ -44,11 +44,6 @@ fn format_text(result: &ScanResult) -> Result<String> {
     Ok(output)
 }
 
-/// Print a finding to stdout
-pub fn print_finding(finding: &Finding) {
-    print!("{}", format_finding(finding));
-}
-
 fn format_finding(finding: &Finding) -> String {
     let mut output = String::new();
 

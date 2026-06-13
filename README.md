@@ -43,10 +43,13 @@ aur-scan system
 - [Quick Start](#quick-start)
 - [Command Reference](#command-reference)
   - [aur-scan check](#aur-scan-check)
+  - [aur-scan install (race-free)](#aur-scan-install-race-free)
   - [aur-scan scan](#aur-scan-scan)
   - [aur-scan system](#aur-scan-system)
+  - [aur-scan ioc](#aur-scan-ioc)
   - [aur-scan codes](#aur-scan-codes)
   - [aur-scan explain](#aur-scan-explain)
+  - [Custom & Community Rules](#custom--community-rules)
 - [Integration Options](#integration-options)
   - [Level 1: Manual CLI](#level-1-manual-cli)
   - [Level 2: Shell Integration](#level-2-shell-integration-recommended)
@@ -78,6 +81,7 @@ The Arch User Repository (AUR) is an incredible community resource that extends 
 
 | Date | Attack | Impact |
 |------|--------|--------|
+| **June 2026** | "Atomic Arch" — 1,500+ orphaned packages adopted and modified to pull malicious npm/bun packages (`atomic-lockfile`, `js-digest`) | Credential stealer + eBPF rootkit (`scales.bpf.c`) dropped from install hooks |
 | **July 2025** | CHAOS RAT distributed via `firefox-patch-bin` and `librewolf-fix-bin` | Remote access trojan with persistence via systemd masquerading |
 | **2018** | Orphaned packages `acroread`, `balz`, `minergate` hijacked | Cryptominer installation via `curl \| bash` and systemd timers |
 | **Ongoing** | Typosquatting attacks mimicking popular package names | Various malware payloads |
@@ -92,7 +96,7 @@ This scanner implements detection rules based on real-world attacks and security
 
 | Feature | Description |
 |---------|-------------|
-| **Static Analysis** | Pattern-based detection of 50+ malicious code patterns |
+| **Static Analysis** | 70+ detection codes across pattern rules and dedicated analyzers, in one auditable catalog |
 | **Install Script Scanning** | Analyzes `.install` scripts for persistence mechanisms |
 | **Source Verification** | Validates URLs, checksums, and download sources |
 | **AUR Integration** | Fetch and scan packages directly from AUR before installation |
@@ -173,30 +177,94 @@ aur-scan codes
 
 ### aur-scan check
 
-Fetch and scan a package from the AUR without installing it.
+Resolve the **full AUR dependency tree**, scan every untrusted package in it,
+and emit a reviewable **SBOM** — all *before* anything is built or installed.
+`paru -S foo` builds foo's entire AUR dependency closure, and a hijacked
+package is often a *dependency*, so the named package alone is not enough.
 
 ```bash
-aur-scan check <package-name> [OPTIONS]
+aur-scan check <package-name>... [OPTIONS]
 
 OPTIONS:
-    --format <FORMAT>    Output format: text, json, sarif [default: text]
-    --fail-on <LEVEL>    Exit with error if findings at this level or above
-                         Values: critical, high, medium, low, info
-    --no-color           Disable colored output
+    --no-deps            Scan only the named packages, not their AUR dep tree
+    --include-optional   Also follow optdepends when resolving the tree
+    --sbom <FILE>        Write a CycloneDX 1.5 SBOM of the whole tree to FILE
+    --local <DIR>        Scan an already-fetched package dir from disk (repeatable)
+    --fail-on <LEVEL>    Exit non-zero if findings at this level or above
+                         (critical, high, medium, low, info)
+    --no-confirm         Don't prompt; just report (for wrappers/CI)
 ```
+
+**Race-free (TOCTOU-safe) workflow.** By default `check` fetches its own copy of
+each PKGBUILD; the helper then re-clones and builds its own copy, so the bytes
+scanned aren't provably the bytes built. To scan the *exact* bytes that will be
+built, fetch once and scan that directory with `--local`, then build from it:
+
+```bash
+paru -G mypkg                          # download PKGBUILD only, no build
+aur-scan check --local mypkg --fail-on critical   # scan those exact bytes
+makepkg -D mypkg -si                   # build the same, reviewed directory
+```
+
+`--local` directories are scanned from disk and marked `(local)`; any remaining
+AUR dependencies are resolved/fetched normally (provide their dirs too for a
+fully race-free tree).
+
+The dependency tree is printed for review, marking each node `[AUR]` (scanned)
+or `[repo]` (official, trusted), flagging orphaned AUR packages, and annotating
+findings per node (`!! 2C/1H`). AUR packages are resolved recursively; official
+repository dependencies are signed and treated as trusted leaves.
 
 **Examples:**
 
 ```bash
-# Basic check
+# Resolve + scan the full tree and review it before installing
 aur-scan check librewolf-bin
 
-# Check with JSON output for scripting
-aur-scan check librewolf-bin --format json
+# Produce a CycloneDX SBOM to archive or review
+aur-scan check ungoogled-chromium-bin --sbom chromium.cdx.json
 
-# Fail CI/CD pipeline on high severity findings
-aur-scan check my-package --fail-on high
+# CI gate: fail on any high+ finding anywhere in the tree
+aur-scan check my-package --no-confirm --fail-on high
+
+# Just the named package, skip the dependency closure
+aur-scan check some-tool --no-deps
 ```
+
+> The dependency tree and SBOM are produced from the AUR RPC + PKGBUILDs
+> **before** `makepkg` runs, which is the only point at which AUR build-time
+> payloads can be caught. Drive it automatically by sourcing the shell
+> integration so `paru`/`yay` call `aur-scan check` before every install.
+
+### aur-scan install (race-free)
+
+Resolve the tree, fetch every AUR package **once** into a workspace, scan those
+exact directories, and — only if the scan gate passes — build them in
+dependency order with `makepkg`, **from the same directories that were
+scanned**. This eliminates the time-of-check/time-of-use gap entirely: there is
+no second fetch between scanning and building.
+
+```bash
+aur-scan install <package>... [OPTIONS]
+
+OPTIONS:
+    --gate <LEVEL>       Findings at/above this severity block the build
+                         [default: critical]
+    --force              Build even if the gate trips (deliberate override)
+    --noconfirm          Pass --noconfirm to makepkg, skip the build prompt
+    --workspace <DIR>    Clone/build workspace (default ~/.cache/aur-scan/build)
+    --sbom <FILE>        Write a CycloneDX SBOM of the tree
+```
+
+Dependency ordering comes from the resolved graph (deps built before
+dependents); `makepkg` itself does all the building, so no PKGBUILD logic is
+reimplemented. Enable it as the default for the shell integration with
+`export AUR_SCAN_MODE=install`. It targets AUR packages; install official-repo
+packages with `pacman` as usual.
+
+> **Scope:** builds each AUR `pkgbase` with `makepkg -si` in dependency order.
+> It does not (yet) cover paru-specific features like split-package selection or
+> chroot builds; for those, use the Level 2 `gate` mode.
 
 ### aur-scan scan
 
@@ -249,6 +317,22 @@ This command:
 - `~/.cache/yay/`
 - `~/.cache/pikaur/aur_repos/`
 - `~/.cache/trizen/`
+
+`system` also cross-references your installed package names against the IOC
+database (see below) and runs the provenance check (flagging any package that
+*gained* risky behavior since the last scan).
+
+### aur-scan ioc
+
+Show or query the local IOC (indicator-of-compromise) database — known-malicious
+payload packages, file artifacts, C2 domains, and campaign metadata. The
+database is embedded and can be extended from a feed (drop a file at
+`/usr/share/aur-scanner/ioc.toml` or `~/.local/share/aur-scanner/ioc.toml`).
+
+```bash
+aur-scan ioc                 # show database stats + campaigns
+aur-scan ioc --check <name>  # is this package/file/hash a known indicator?
+```
 
 ### aur-scan codes
 
@@ -375,20 +459,26 @@ The wrapper:
 - Prompts on critical/high findings
 - Passes through non-install operations unchanged
 
-### Level 4: Pacman Hook
+### Level 4: Pacman Hook (backstop only — runs *after* the build)
 
-For system-wide enforcement, install the pacman hook:
+> **Important timing caveat.** For an AUR package, `makepkg` runs the
+> PKGBUILD's `prepare()`/`build()`/`package()` **before** the pacman
+> transaction. A libalpm `PreTransaction` hook fires during that transaction —
+> i.e. *after* the build has already executed. So this hook **cannot stop a
+> build-time payload** (the most common AUR attack, including Atomic Arch). It
+> only blocks payloads in the package's `.install` scriptlet. **Use the shell
+> integration (Level 2) as your real gate; treat this hook as a backstop.**
+
+For a defense-in-depth backstop, install the pacman hook:
 
 ```bash
-sudo cp /usr/share/aur-scan/aur-scan.hook /usr/share/libalpm/hooks/
+sudo cp /usr/share/aur-scan/aur-scan.hook.example /usr/share/libalpm/hooks/aur-scan.hook
 ```
 
 **Hook behavior:**
-- Triggers before package transactions
-- Scans packages being installed
-- **Aborts transaction on CRITICAL findings**
+- Triggers before the *install transaction* (after the build)
+- **Aborts transaction on CRITICAL findings** in the `.install` scriptlet
 - Warns on HIGH severity findings
-- Requires explicit override for critical issues
 
 **Hook configuration** (`/usr/share/libalpm/hooks/aur-scan.hook`):
 
@@ -411,91 +501,134 @@ NeedsTargets
 
 ## Detection Rules Reference
 
-### Critical Severity
+> Generated from the catalog (`aur-scan codes --format markdown`). Every ID is
+> unique and audit-enforced. Extend it with your own TOML rules
+> (see [Custom & Community Rules](#custom--community-rules)).
 
-These patterns indicate likely malicious behavior and should always be investigated.
+## CRITICAL severity
 
-| Code | Name | Description | CWE |
-|------|------|-------------|-----|
-| `DLE-001` | Curl pipe to shell | `curl ... \| bash` pattern | CWE-94 |
-| `DLE-002` | Wget pipe to shell | `wget ... \| sh` pattern | CWE-94 |
-| `DLE-003` | Curl output executed | Download and execute via file | CWE-94 |
-| `PASTE-001` | Pastebin download | Downloads from paste sites (pastebin, ptpb.pw, etc.) | CWE-506 |
-| `SHELL-001` | Bash reverse shell | `/dev/tcp/` connections | CWE-506 |
-| `SHELL-002` | Netcat reverse shell | `nc -e` or `ncat -e` patterns | CWE-506 |
-| `SHELL-003` | Python reverse shell | Python socket connections | CWE-506 |
-| `SHELL-004` | Socat shell | Socat TCP/EXEC patterns | CWE-506 |
-| `CRED-001` | SSH key access | Access to `~/.ssh/` | CWE-522 |
-| `CRED-002` | GPG key access | Access to `~/.gnupg/` | CWE-522 |
-| `CRED-003` | Password file access | Access to shadow, netrc, AWS credentials | CWE-522 |
-| `BROWSER-001` | Browser profile access | Access to Firefox/Chrome profiles | CWE-522 |
-| `BROWSER-002` | Browser database access | Access to logins.json, cookies.sqlite | CWE-522 |
-| `PRIV-001` | Sudo in build | Using sudo in build/package functions | CWE-250 |
-| `PRIV-002` | SUID/SGID setting | Setting setuid/setgid bits | CWE-250 |
-| `PRIV-003` | Sudoers modification | Modifying /etc/sudoers | CWE-250 |
-| `INSTALL-001` | Python in install script | Executing Python in post_install | CWE-94 |
-| `INSTALL-003` | Network in install script | curl/wget in install scripts | CWE-494 |
-| `PERSIST-001` | Systemd service creation | Creating/enabling systemd services | CWE-506 |
-| `PERSIST-002` | Systemd timer creation | Creating systemd timers | CWE-506 |
-| `PERSIST-004` | rc.local modification | Modifying boot scripts | CWE-506 |
-| `PERSIST-006` | Systemd masquerading | Binary named like systemd component | CWE-506 |
-| `CRYPTO-001` | Mining pool connection | stratum+tcp:// or pool URLs | CWE-506 |
-| `CRYPTO-002` | Cryptominer binary | Known miner executables (xmrig, etc.) | CWE-506 |
-| `CRYPTO-003` | Wallet address | Cryptocurrency wallet addresses | CWE-506 |
-| `EXFIL-001` | Curl POST exfiltration | Sending data via curl POST | CWE-200 |
-| `EXFIL-002` | Netcat data transfer | Piping data through netcat | CWE-200 |
-| `EXFIL-003` | Discord/Telegram webhook | Webhook URLs for C2/exfil | CWE-506 |
-| `ENV-001` | LD_PRELOAD manipulation | Library injection via LD_PRELOAD | CWE-426 |
-| `ENV-003` | Shell config modification | Modifying bashrc/zshrc/profile | CWE-506 |
+| Code | Name | Category | Detector | CWE |
+|------|------|----------|----------|-----|
+| `ATOMIC-001` | Atomic Arch malicious npm/bun package | Malicious Code | rules | CWE-506 |
+| `ATOMIC-002` | Node/Bun package manager in install hook | Malicious Code | rules | CWE-494 |
+| `ATOMIC-003` | eBPF rootkit / payload artifact | Persistence | rules | CWE-506 |
+| `BROWSER-001` | Browser profile access | Credential Theft | rules | CWE-522 |
+| `BROWSER-002` | Browser database access | Credential Theft | rules | CWE-522 |
+| `CRED-001` | SSH key access | Credential Theft | rules | CWE-522 |
+| `CRED-002` | GPG key access | Credential Theft | rules | CWE-522 |
+| `CRED-003` | Password file access | Credential Theft | rules | CWE-522 |
+| `CRYPTO-001` | Mining pool connection | Cryptomining | rules | CWE-506 |
+| `CRYPTO-002` | Cryptominer binary | Cryptomining | rules | CWE-506 |
+| `CRYPTO-003` | Monero/Bitcoin wallet address | Cryptomining | rules | CWE-506 |
+| `DEEP-001` | Decode-and-execute flow | Obfuscation | deep | CWE-506 |
+| `DLE-001` | Curl pipe to shell | Command Injection | rules | CWE-94 |
+| `DLE-002` | Wget pipe to shell | Command Injection | rules | CWE-94 |
+| `DLE-003` | Curl output executed | Command Injection | rules | CWE-94 |
+| `ENV-001` | LD_PRELOAD manipulation | Malicious Code | rules | CWE-426 |
+| `ENV-003` | Bashrc/profile modification | Persistence | rules | CWE-506 |
+| `EXEC-REMOTE` | Fetches and runs external code | Malicious Code | remote_exec | CWE-494 |
+| `EXFIL-001` | Curl POST data exfiltration | Data Exfiltration | rules | CWE-200 |
+| `EXFIL-002` | Netcat data transfer | Data Exfiltration | rules | CWE-200 |
+| `EXFIL-003` | Discord/Telegram webhook | Data Exfiltration | rules | CWE-506 |
+| `INSTALL-001` | Python execution in install script | Malicious Code | rules | CWE-94 |
+| `INSTALL-003` | Network access in install script | Network Security | rules | CWE-494 |
+| `IOC-001` | Known indicator-of-compromise match | Malicious Code | ioc | CWE-506 |
+| `PASTE-001` | Pastebin download | Malicious Code | rules | CWE-506 |
+| `PERSIST-001` | Systemd service creation in install | Persistence | rules | CWE-506 |
+| `PERSIST-002` | Systemd timer creation | Persistence | rules | CWE-506 |
+| `PERSIST-004` | rc.local modification | Persistence | rules | CWE-506 |
+| `PERSIST-006` | Systemd masquerading | Persistence | rules | CWE-506 |
+| `PRIV-001` | Sudo usage in a build function | Privilege Escalation | privilege | CWE-250 |
+| `PRIV-002` | SUID/SGID bit set in a function | Privilege Escalation | privilege | CWE-732 |
+| `PRIV-003` | Sudoers modification | Privilege Escalation | privilege | CWE-250 |
+| `SHELL-001` | Bash reverse shell | Malicious Code | rules | CWE-506 |
+| `SHELL-002` | Netcat reverse shell | Malicious Code | rules | CWE-506 |
+| `SHELL-003` | Python reverse shell | Malicious Code | rules | CWE-506 |
+| `SHELL-004` | Socat shell | Malicious Code | rules | CWE-506 |
 
-### High Severity
+## HIGH severity
 
-Suspicious patterns that warrant careful review.
+| Code | Name | Category | Detector | CWE |
+|------|------|----------|----------|-----|
+| `CHK-001` | No checksums for sources | Cryptography | checksum | CWE-354 |
+| `CHK-005` | All non-VCS sources use SKIP | Cryptography | checksum | CWE-354 |
+| `CHK-006` | Checksum count mismatch | Configuration | checksum | - |
+| `DEEP-002` | Large embedded encoded blob | Obfuscation | deep | CWE-506 |
+| `ENV-002` | PATH manipulation | Malicious Code | rules | CWE-426 |
+| `FUNC-001` | Network access in a build function | Network Security | pattern | - |
+| `HIDDEN-001` | Hidden file creation in home | Malicious Code | rules | - |
+| `HIDDEN-002` | Tmp directory execution | Malicious Code | rules | - |
+| `HIDDEN-003` | Binary in non-standard location | Malicious Code | rules | - |
+| `INSTALL-002` | Binary execution in install script | Malicious Code | rules | CWE-94 |
+| `OBF-001` | Base64 decoding | Obfuscation | rules | CWE-506 |
+| `OBF-002` | Eval usage | Command Injection | rules | CWE-95 |
+| `OBF-003` | Hex-encoded payload | Obfuscation | rules | CWE-506 |
+| `OBF-005` | Gzip decode execution | Obfuscation | rules | CWE-94 |
+| `PERSIST-003` | Cron job creation | Persistence | rules | - |
+| `PERSIST-005` | XDG autostart creation | Persistence | rules | - |
+| `PRIV-005` | Kernel module operations | Privilege Escalation | privilege | - |
+| `PRIV-006` | Sudo in an install hook | Privilege Escalation | privilege | CWE-250 |
+| `PROV-001` | Package gained risky behavior | Suspicious Metadata | provenance | CWE-506 |
+| `SRC-002` | Suspicious source domain | Network Security | source | - |
+| `SRC-003` | Raw IP address in source URL | Network Security | source | - |
+| `SRC-004` | URL shortener in source | Network Security | source | - |
+| `URL-001` | Raw IP in URL | Network Security | rules | - |
+| `URL-002` | URL shortener | Network Security | rules | - |
+| `URL-003` | Dynamic DNS domain | Network Security | rules | - |
 
-| Code | Name | Description | CWE |
-|------|------|-------------|-----|
-| `OBF-001` | Base64 decoding | `base64 -d` may hide payloads | CWE-506 |
-| `OBF-002` | Eval usage | Dynamic code execution | CWE-95 |
-| `OBF-003` | Hex-encoded payload | `\xNN` escape sequences | CWE-506 |
-| `OBF-005` | Gzip decode execution | Decompress and execute | CWE-94 |
-| `CHK-001` | No checksums | Sources without any checksums | CWE-354 |
-| `CHK-005` | All sources SKIP | All non-VCS sources use SKIP checksum | CWE-354 |
-| `CHK-006` | Checksum mismatch | Checksum count doesn't match source count | - |
-| `URL-001` | Raw IP in URL | URLs with IP addresses instead of domains | - |
-| `URL-002` | URL shortener | bit.ly, tinyurl, etc. | - |
-| `URL-003` | Dynamic DNS domain | duckdns, no-ip, etc. | - |
-| `INSTALL-002` | Binary execution in install | Running binaries during install | CWE-94 |
-| `PERSIST-003` | Cron job creation | Creating cron entries | - |
-| `PERSIST-005` | XDG autostart creation | Creating autostart entries | - |
-| `HIDDEN-001` | Hidden file in home | Creating ~/. files | - |
-| `HIDDEN-002` | Tmp directory execution | Running code from /tmp | - |
-| `HIDDEN-003` | Non-standard binary location | Binaries in share directories | - |
-| `ENV-002` | PATH manipulation | Overwriting PATH variable | CWE-426 |
+## MEDIUM severity
 
-### Medium Severity
+| Code | Name | Category | Detector | CWE |
+|------|------|----------|----------|-----|
+| `CHK-002` | MD5 checksums used | Cryptography | checksum | CWE-328 |
+| `CHK-003` | SHA1 checksums used | Cryptography | checksum | CWE-328 |
+| `CHK-004` | Some sources use SKIP checksum | Cryptography | checksum | CWE-354 |
+| `OBF-004` | String concatenation obfuscation | Obfuscation | rules | - |
+| `PRIV-004` | Capabilities being set | Privilege Escalation | privilege | CWE-250 |
+| `SRC-001` | Insecure source/transport protocol | Network Security | source | CWE-319 |
+| `SRC-005` | No sources with a build function | Configuration | source | - |
 
-Security concerns that should be reviewed but may be legitimate.
+## LOW severity
 
-| Code | Name | Description | CWE |
-|------|------|-------------|-----|
-| `CHK-002` | MD5 checksum | Using broken MD5 algorithm | CWE-328 |
-| `CHK-003` | SHA1 checksum | Using weak SHA1 algorithm | CWE-328 |
-| `CHK-004` | Partial SKIP checksums | Some non-VCS sources use SKIP | CWE-354 |
-| `NET-001` | HTTP source URL | Downloading sources over HTTP | CWE-319 |
-| `SRC-001` | Suspicious git source | Git from non-standard hosting | - |
-| `OBF-004` | String concatenation | Obfuscating commands via concatenation | - |
+| Code | Name | Category | Detector | CWE |
+|------|------|----------|----------|-----|
+| `META-001` | Provides impersonation | Suspicious Metadata | rules | - |
+| `SRC-006` | VCS source from non-standard host | Network Security | source | - |
 
-> **Note:** VCS sources (git, svn, hg, bzr) legitimately use `SKIP` checksums since their content changes with each clone. The scanner only flags `SKIP` checksums on non-VCS sources (tarballs, patches, etc.).
+## Custom & Community Rules
 
-### Low/Informational
+Every detection code lives in one authoritative **catalog**, so the index is
+unique and auditable — run `aur-scan codes` to see it, or
+`aur-scan explain <ID>` for any code. You can extend it with a few lines of
+TOML; no rebuild required.
 
-Observations that may be relevant for comprehensive review.
+Drop `.toml` files into any of:
 
-| Code | Name | Description |
-|------|------|-------------|
-| `META-001` | Provides impersonation | Package provides another package name |
+| Path | Scope |
+|------|-------|
+| `/usr/share/aur-scanner/rules.d/` | distro / package-shipped |
+| `/etc/aur-scanner/rules.d/` | system administrator |
+| `~/.config/aur-scanner/rules.d/` | per user |
 
----
+```toml
+[[rule]]
+id = "ACME-001"                 # must be UNIQUE across the whole catalog
+name = "Flags the ACME backdoor marker"
+description = "Detects the marker string left by the ACME backdoor."
+severity = "critical"           # critical | high | medium | low | info
+category = "malicious_code"
+recommendation = "Do not build; report the package."
+file_types = ["pkgbuild", "install_script"]
+
+[[rule.patterns]]
+type = "regex"
+pattern = "acme_backdoor_[0-9a-f]{8}"
+```
+
+The loader skips malformed files with a warning (it never breaks the engine),
+and the catalog refuses to start if any ID collides. A shipped example lives at
+`/usr/share/aur-scanner/rules.d/example.toml`. Use an org-specific prefix to
+avoid collisions.
 
 ## Output Formats
 
@@ -591,6 +724,26 @@ ttl_hours = 24
 ---
 
 ## Real-World Detection Examples
+
+### Atomic Arch Supply-Chain Attack (June 2026)
+
+Orphaned packages were adopted and their install hooks modified to pull a
+malicious npm/bun package that drops an infostealer and eBPF rootkit. The
+scanner flags both the install-hook behavior and the known-bad package names:
+
+```
+[CRITICAL] ATOMIC-002 Node/Bun package manager in install hook
+    Location: alvr.install:4
+    npm install atomic-lockfile
+
+[CRITICAL] ATOMIC-001 Atomic Arch malicious npm/bun package
+    Location: alvr.install:4
+    Known-malicious package: atomic-lockfile
+
+[CRITICAL] ATOMIC-001 Atomic Arch malicious npm/bun package
+    Location: alvr.install:9
+    Known-malicious package: js-digest (wave 2, Bun installer)
+```
 
 ### CHAOS RAT Attack (July 2025)
 

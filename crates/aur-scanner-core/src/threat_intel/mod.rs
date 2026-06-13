@@ -1,6 +1,11 @@
 //! Threat intelligence integration module
 //!
-//! Optional integration with external threat intelligence services.
+//! Provides a local, updatable IOC database ([`ioc`]) plus optional hooks for
+//! external threat-intelligence services.
+
+pub mod ioc;
+
+pub use ioc::{Campaign, IocDatabase, IocHit, IocKind};
 
 use crate::error::Result;
 use async_trait::async_trait;

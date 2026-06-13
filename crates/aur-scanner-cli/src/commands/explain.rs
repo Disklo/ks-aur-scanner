@@ -1,84 +1,91 @@
-//! Explain a detection code in detail
+//! Explain a detection code in detail (sourced from the authoritative catalog).
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
+use aur_scanner_core::catalog::{Catalog, CatalogEntry};
+use aur_scanner_core::Severity;
 use colored::Colorize;
-use super::codes::get_all_codes;
 
 pub fn run(code: &str) -> Result<()> {
-    let codes = get_all_codes();
-    let code_upper = code.to_uppercase();
+    let catalog = Catalog::load();
+    let want = code.to_uppercase();
 
-    let entry = codes.iter().find(|e| e.code == code_upper);
+    if let Some(e) = catalog.get(&want) {
+        print_detailed_explanation(e);
+        return Ok(());
+    }
 
-    match entry {
-        Some(e) => {
-            print_detailed_explanation(e);
+    let matches: Vec<&CatalogEntry> = catalog
+        .entries
+        .iter()
+        .filter(|e| e.id.to_uppercase().contains(&want) || e.name.to_uppercase().contains(&want))
+        .collect();
+
+    match matches.len() {
+        0 => {
+            println!("{}", format!("Unknown code: {}", code).red());
+            println!();
+            println!("Use 'aur-scan codes' to list all available detection codes.");
+            bail!("Unknown detection code");
+        }
+        1 => {
+            print_detailed_explanation(matches[0]);
             Ok(())
         }
-        None => {
-            // Try partial match
-            let matches: Vec<_> = codes.iter()
-                .filter(|e| e.code.contains(&code_upper) || e.name.to_uppercase().contains(&code_upper))
-                .collect();
-
-            if matches.is_empty() {
-                println!("{}", format!("Unknown code: {}", code).red());
-                println!();
-                println!("Use 'aur-scan codes' to list all available detection codes.");
-                bail!("Unknown detection code");
-            } else if matches.len() == 1 {
-                print_detailed_explanation(matches[0]);
-                Ok(())
-            } else {
-                println!("{}", format!("Multiple matches for '{}':", code).yellow());
-                println!();
-                for m in matches {
-                    println!("  {} - {}", m.code.green(), m.name);
-                }
-                println!();
-                println!("Please specify the exact code.");
-                Ok(())
+        _ => {
+            println!("{}", format!("Multiple matches for '{}':", code).yellow());
+            println!();
+            for m in matches {
+                println!("  {} - {}", m.id.green(), m.name);
             }
+            println!();
+            println!("Please specify the exact code.");
+            Ok(())
         }
     }
 }
 
-fn print_detailed_explanation(entry: &super::codes::CodeEntry) {
+fn print_detailed_explanation(entry: &CatalogEntry) {
+    let sev = entry.severity.to_string();
     let severity_colored = match entry.severity {
-        "Critical" => entry.severity.red().bold(),
-        "High" => entry.severity.yellow().bold(),
-        "Medium" => entry.severity.blue().bold(),
-        "Low" => entry.severity.white().bold(),
-        _ => entry.severity.normal(),
+        Severity::Critical => sev.red().bold(),
+        Severity::High => sev.yellow().bold(),
+        Severity::Medium => sev.blue().bold(),
+        Severity::Low => sev.white().bold(),
+        Severity::Info => sev.normal(),
     };
 
     println!();
     println!("{}", "=".repeat(70));
     println!("{} {} [{}]",
-        entry.code.green().bold(),
+        entry.id.green().bold(),
         entry.name.white().bold(),
         severity_colored);
     println!("{}", "=".repeat(70));
     println!();
 
     println!("{}", "Category:".cyan().bold());
-    println!("  {}", entry.category);
+    println!("  {}  (detector: {})", entry.category, entry.owner.dimmed());
     println!();
 
     println!("{}", "Description:".cyan().bold());
-    for line in textwrap(entry.description, 66) {
+    for line in textwrap(&entry.description, 66) {
         println!("  {}", line);
     }
     println!();
 
     println!("{}", "Recommendation:".cyan().bold());
-    for line in textwrap(entry.recommendation, 66) {
+    for line in textwrap(&entry.recommendation, 66) {
         println!("  {}", line);
     }
     println!();
 
+    if let Some(cwe) = &entry.cwe {
+        println!("{} {}", "CWE:".cyan().bold(), cwe.dimmed());
+        println!();
+    }
+
     // Add real-world context for notable codes
-    if let Some(context) = get_real_world_context(entry.code) {
+    if let Some(context) = get_real_world_context(&entry.id) {
         println!("{}", "Real-World Context:".cyan().bold());
         for line in textwrap(&context, 66) {
             println!("  {}", line);
@@ -87,7 +94,7 @@ fn print_detailed_explanation(entry: &super::codes::CodeEntry) {
     }
 
     // Add technical details
-    if let Some(tech) = get_technical_details(entry.code) {
+    if let Some(tech) = get_technical_details(&entry.id) {
         println!("{}", "Technical Details:".cyan().bold());
         for line in textwrap(&tech, 66) {
             println!("  {}", line);
@@ -96,7 +103,7 @@ fn print_detailed_explanation(entry: &super::codes::CodeEntry) {
     }
 
     // Add detection patterns
-    if let Some(patterns) = get_detection_patterns(entry.code) {
+    if let Some(patterns) = get_detection_patterns(&entry.id) {
         println!("{}", "Detection Patterns:".cyan().bold());
         for pattern in patterns {
             println!("  - {}", pattern.dimmed());
@@ -105,7 +112,7 @@ fn print_detailed_explanation(entry: &super::codes::CodeEntry) {
     }
 
     // Add related codes
-    if let Some(related) = get_related_codes(entry.code) {
+    if let Some(related) = get_related_codes(&entry.id) {
         println!("{}", "Related Codes:".cyan().bold());
         println!("  {}", related.join(", "));
         println!();
@@ -168,6 +175,14 @@ fn get_real_world_context(code: &str) -> Option<String> {
              alternatives to legitimate packages (firefox-fix, etc.), tricking \
              users into installing them as dependencies.".to_string()
         ),
+        "ATOMIC-001" | "ATOMIC-002" | "ATOMIC-003" => Some(
+            "The June 2026 'Atomic Arch' campaign adopted hundreds of orphaned AUR \
+             packages (alvr, premake-git, and 1,500+ others) and modified their \
+             PKGBUILD/install hooks to run `npm install atomic-lockfile` (wave 1) or \
+             `bun install js-digest` (wave 2). The payload is a credential stealer \
+             with an optional root-only eBPF rootkit (scales.bpf.c). The hijacked \
+             packages themselves looked clean, so signature scanners missed them.".to_string()
+        ),
         _ => None,
     }
 }
@@ -196,6 +211,13 @@ fn get_technical_details(code: &str) -> Option<String> {
             "Base64 encoding is commonly used to hide malicious payloads from \
              simple pattern matching. Decode with: echo 'payload' | base64 -d".to_string()
         ),
+        "ATOMIC-002" => Some(
+            "The hijacked PKGBUILDs added an install hook (post_install/post_upgrade) \
+             that shells out to a JS package manager: `npm install atomic-lockfile` or \
+             `bun install js-digest`. The malicious npm package runs a `preinstall` \
+             lifecycle script that drops a bundled ELF, which loads scales.bpf.c via \
+             eBPF for rootkit-like hiding.".to_string()
+        ),
         _ => None,
     }
 }
@@ -222,6 +244,17 @@ fn get_detection_patterns(code: &str) -> Option<Vec<&'static str>> {
             r"ix\.io",
             r"hastebin",
         ]),
+        "ATOMIC-001" => Some(vec![
+            r"\b(atomic-lockfile|js-digest|lockfile-js)\b",
+        ]),
+        "ATOMIC-002" => Some(vec![
+            r"\b(npm|pnpm|yarn)\s+(install|add|i)\b",
+            r"\bbunx?\s+(install|add|i|x)\b",
+        ]),
+        "ATOMIC-003" => Some(vec![
+            r"scales\.bpf\.c",
+            r"src/hooks/deps\b",
+        ]),
         _ => None,
     }
 }
@@ -235,6 +268,9 @@ fn get_related_codes(code: &str) -> Option<Vec<&'static str>> {
         "CRED-001" => Some(vec!["CRED-002", "CRED-003", "BROWSER-001", "BROWSER-002"]),
         "INSTALL-001" => Some(vec!["INSTALL-002", "INSTALL-003", "PERSIST-001"]),
         "OBF-001" => Some(vec!["OBF-002", "OBF-003", "OBF-005"]),
+        "ATOMIC-001" => Some(vec!["ATOMIC-002", "ATOMIC-003", "INSTALL-003"]),
+        "ATOMIC-002" => Some(vec!["ATOMIC-001", "ATOMIC-003", "INSTALL-003"]),
+        "ATOMIC-003" => Some(vec!["ATOMIC-001", "ATOMIC-002", "PERSIST-006"]),
         _ => None,
     }
 }
