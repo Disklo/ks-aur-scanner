@@ -94,7 +94,11 @@ impl Catalog {
         for e in &self.entries {
             *seen.entry(e.id.clone()).or_insert(0usize) += 1;
         }
-        let mut dups: Vec<String> = seen.into_iter().filter(|(_, n)| *n > 1).map(|(k, _)| k).collect();
+        let mut dups: Vec<String> = seen
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(k, _)| k)
+            .collect();
         dups.sort();
         dups
     }
@@ -105,7 +109,10 @@ impl Catalog {
         if dups.is_empty() {
             Ok(())
         } else {
-            Err(format!("duplicate finding IDs in catalog: {}", dups.join(", ")))
+            Err(format!(
+                "duplicate finding IDs in catalog: {}",
+                dups.join(", ")
+            ))
         }
     }
 
@@ -116,7 +123,11 @@ impl Catalog {
 
     /// All distinct category display names present, sorted.
     pub fn categories(&self) -> Vec<String> {
-        let mut cats: Vec<String> = self.entries.iter().map(|e| e.category.to_string()).collect();
+        let mut cats: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| e.category.to_string())
+            .collect();
         cats.sort();
         cats.dedup();
         cats
@@ -200,15 +211,26 @@ pub fn analyzer_codes() -> Vec<CatalogEntry> {
           "The file decodes/decompresses data and dynamically executes shell input, possibly across lines.", "Decode and review the payload manually."),
         e("DEEP-002", "Large embedded encoded blob", High, Obfuscation, "deep", Some("CWE-506"),
           "A large base64-like blob is embedded in the package.", "Decode and verify the blob is legitimate data."),
+        e("DEEP-003", "Deobfuscation applied during scan", Low, Obfuscation, "deep", None,
+          "Shell deobfuscation techniques were applied and the resolved text was re-scanned for hidden commands.", "Review deobfuscated findings carefully."),
         // -- remote_exec analyzer --
         e("EXEC-REMOTE", "Fetches and runs external code", Critical, MaliciousCode, "remote_exec", Some("CWE-494"),
           "The package downloads and executes code from an external URL at build/install time; the scanner does not follow it (opaque boundary).", "Do not build; obtain software that ships its real code."),
         // -- provenance --
         e("PROV-001", "Package gained risky behavior", High, SuspiciousMetadata, "provenance", Some("CWE-506"),
           "The package introduced fetch/execute behavior it did not have at the previous scan.", "Review the PKGBUILD/install diff before building."),
+        e("PROV-002", "Maintainer changed with risky behavior added", High, SuspiciousMetadata, "provenance", Some("CWE-506"),
+          "The package's maintainer changed in the same update that introduced risky behavior, the classic signature of a hijack.", "Verify the maintainer change is legitimate before building."),
+        e("PROV-003", "Maintainer changed since last scan", Low, SuspiciousMetadata, "provenance", None,
+          "The package's maintainer changed although no risky behavior was detected. Maintainer changes are the most common precursor to hijacks.", "Verify the maintainer change is legitimate."),
         // -- pattern analyzer (function body) --
         e("FUNC-001", "Network access in a build function", High, NetworkSecurity, "pattern", None,
           "A build/package function performs network access (curl/wget/fetch); downloads belong in the source array.", "Move downloads to the source= array."),
+        // -- system / dependency-tree metadata --
+        e("META-003", "Orphaned AUR dependency", Low, Dependencies, "system", Some("CWE-1104"),
+          "This package is an AUR dependency that has no maintainer; orphaned packages are the primary hijack vector.", "Consider alternatives or verify the package carefully before building."),
+        e("META-004", "Out-of-date AUR dependency", Low, Dependencies, "system", Some("CWE-1104"),
+          "This AUR dependency is flagged out of date and may be unmaintained — a higher hijack risk.", "Verify the package is still maintained before building."),
     ]
 }
 
@@ -239,18 +261,50 @@ mod tests {
     #[test]
     fn catalog_covers_every_analyzer_emitted_id() {
         const EMITTED: &[&str] = &[
-            "CHK-001", "CHK-002", "CHK-003", "CHK-004", "CHK-005", "CHK-006",
-            "PRIV-001", "PRIV-002", "PRIV-003", "PRIV-004", "PRIV-005", "PRIV-006",
-            "SRC-001", "SRC-002", "SRC-003", "SRC-004", "SRC-005", "SRC-006",
-            "IOC-001", "DEEP-001", "DEEP-002", "EXEC-REMOTE", "PROV-001", "FUNC-001",
+            "CHK-001",
+            "CHK-002",
+            "CHK-003",
+            "CHK-004",
+            "CHK-005",
+            "CHK-006",
+            "PRIV-001",
+            "PRIV-002",
+            "PRIV-003",
+            "PRIV-004",
+            "PRIV-005",
+            "PRIV-006",
+            "SRC-001",
+            "SRC-002",
+            "SRC-003",
+            "SRC-004",
+            "SRC-005",
+            "SRC-006",
+            "IOC-001",
+            "DEEP-001",
+            "DEEP-002",
+            "DEEP-003",
+            "EXEC-REMOTE",
+            "PROV-001",
+            "PROV-002",
+            "PROV-003",
+            "FUNC-001",
+            "META-003",
+            "META-004",
         ];
         let catalog = Catalog::load();
         for id in EMITTED {
-            assert!(catalog.get(id).is_some(), "emitted code {id} missing from catalog");
+            assert!(
+                catalog.get(id).is_some(),
+                "emitted code {id} missing from catalog"
+            );
         }
         // And no phantom analyzer codes (every analyzer_codes id is in EMITTED).
         for c in analyzer_codes() {
-            assert!(EMITTED.contains(&c.id.as_str()), "catalog has phantom analyzer code {}", c.id);
+            assert!(
+                EMITTED.contains(&c.id.as_str()),
+                "catalog has phantom analyzer code {}",
+                c.id
+            );
         }
     }
 }
