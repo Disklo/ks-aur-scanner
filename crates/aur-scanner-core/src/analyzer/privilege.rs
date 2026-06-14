@@ -231,7 +231,7 @@ impl SecurityAnalyzer for PrivilegeAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{StaticParser, PkgbuildParser};
+    use crate::parser::{PkgbuildParser, StaticParser};
     use crate::types::ScanConfig;
     use std::path::PathBuf;
 
@@ -244,6 +244,10 @@ mod tests {
             install_script: None,
             config: ScanConfig::default(),
             file_path: PathBuf::from("PKGBUILD"),
+            deobfuscated_pkgbuild_content: None,
+            deobfuscated_install_content: None,
+            resolved_variables: std::collections::HashMap::new(),
+            maintainer_id: None,
         }
     }
 
@@ -309,7 +313,10 @@ package() {
         assert!(
             !findings.iter().any(|f| f.id == "PRIV-002"),
             "benign chmod 644/755/700 and install -m644/755 must not trip PRIV-002, got: {:?}",
-            findings.iter().filter(|f| f.id == "PRIV-002").collect::<Vec<_>>()
+            findings
+                .iter()
+                .filter(|f| f.id == "PRIV-002")
+                .collect::<Vec<_>>()
         );
     }
 

@@ -10,6 +10,7 @@ pub mod analyzer;
 pub mod aur;
 pub mod cache;
 pub mod catalog;
+pub mod deobfuscate;
 pub mod depgraph;
 pub mod error;
 pub mod overlay;
@@ -26,6 +27,7 @@ pub use types::*;
 use analyzer::SecurityAnalyzer;
 use parser::PkgbuildParser;
 use rules::RuleEngine;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use threat_intel::IocDatabase;
@@ -118,7 +120,11 @@ impl Scanner {
                     hooks: parser::parse_install_hooks(&script_content),
                 }),
                 Err(e) => {
-                    warn!("Failed to read install script {}: {}", install_path.display(), e);
+                    warn!(
+                        "Failed to read install script {}: {}",
+                        install_path.display(),
+                        e
+                    );
                     None
                 }
             }
@@ -128,11 +134,22 @@ impl Scanner {
         let scanned_install = install_script.as_ref().map(|s| s.path.clone());
 
         // Create analysis context
+        let deob_pkgbuild = deobfuscate::deobfuscate_shell_text(&pkgbuild.raw_content);
+        let deob_install = install_script
+            .as_ref()
+            .and_then(|s| deobfuscate::deobfuscate_shell_text(&s.content));
+        let resolved_vars = track_variable_assignments(&pkgbuild.raw_content);
+        let maintainer_id = extract_maintainer_id(&pkgbuild.raw_content);
+
         let context = AnalysisContext {
             pkgbuild: pkgbuild.clone(),
             install_script,
             config: self.config.clone(),
             file_path: path.to_path_buf(),
+            deobfuscated_pkgbuild_content: deob_pkgbuild,
+            deobfuscated_install_content: deob_install,
+            resolved_variables: resolved_vars,
+            maintainer_id,
         };
 
         // Run all analyzers
@@ -151,6 +168,49 @@ impl Scanner {
                     warn!("Analyzer {} failed: {}", analyzer.name(), e);
                 }
             }
+        }
+
+        // Emit an audit code if deobfuscation was applied so the chain is
+        // traceable: which deobfuscation techniques were used, and what the
+        // resolved text looks like.
+        if context.deobfuscated_install_content.is_some()
+            || context.deobfuscated_pkgbuild_content.is_some()
+        {
+            let mut techniques = Vec::new();
+            if context.deobfuscated_pkgbuild_content.is_some()
+                || context.deobfuscated_install_content.is_some()
+            {
+                techniques.push("ansi-c-quote-flatten-normalize-variable-expansion");
+            }
+            if !context.resolved_variables.is_empty() {
+                techniques.push("variable-tracking");
+            }
+            findings.push(Finding {
+                id: "DEEP-003".to_string(),
+                severity: Severity::Low,
+                category: Category::Obfuscation,
+                title: "Deobfuscation applied during scan".to_string(),
+                description: format!(
+                    "Shell deobfuscation techniques were applied: {}. \
+                     The deobfuscated text was re-scanned for hidden commands. \
+                     Any findings with 'deobfuscated: true' in their metadata \
+                     were detected only after deobfuscation.",
+                    techniques.join(", "),
+                ),
+                location: Location {
+                    file: path.to_path_buf(),
+                    line: None,
+                    column: None,
+                    snippet: None,
+                },
+                recommendation:
+                    "Review deobfuscated findings carefully; they indicate deliberate evasion."
+                        .to_string(),
+                cwe_id: None,
+                metadata: serde_json::json!({
+                    "techniques": techniques,
+                }),
+            });
         }
 
         // Filter by minimum severity (lower enum value = higher severity)
@@ -224,7 +284,10 @@ fn read_text_capped(path: &Path) -> Result<String> {
 /// install hook is a primary malware delivery vector. Resolution order:
 /// 1. Expand `$pkgname`/`$pkgbase` in the declared `install=` value.
 /// 2. Fall back to a single `*.install` file in the package directory.
-fn resolve_install_path(dir: &Path, pkgbuild: &parser::ParsedPkgbuild) -> Option<std::path::PathBuf> {
+fn resolve_install_path(
+    dir: &Path,
+    pkgbuild: &parser::ParsedPkgbuild,
+) -> Option<std::path::PathBuf> {
     let pkgname = pkgbuild.pkgname.first().cloned().unwrap_or_default();
 
     if let Some(install_file) = &pkgbuild.install {
@@ -233,7 +296,10 @@ fn resolve_install_path(dir: &Path, pkgbuild: &parser::ParsedPkgbuild) -> Option
         // directory. Reject path separators / traversal so a hostile install=
         // value cannot make us read a file outside the cloned package dir.
         if expanded.is_empty() || expanded.contains('/') || expanded.contains("..") {
-            warn!("ignoring suspicious install= value '{}' (path traversal)", install_file);
+            warn!(
+                "ignoring suspicious install= value '{}' (path traversal)",
+                install_file
+            );
         } else {
             let candidate = dir.join(&expanded);
             if candidate.is_file() {
@@ -263,9 +329,7 @@ fn resolve_install_path(dir: &Path, pkgbuild: &parser::ParsedPkgbuild) -> Option
             // and warn so the gap is visible rather than silent.
             let preferred = install_files
                 .iter()
-                .find(|p| {
-                    p.file_stem().and_then(|s| s.to_str()) == Some(pkgname.as_str())
-                })
+                .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(pkgname.as_str()))
                 .cloned();
             if preferred.is_none() {
                 warn!(
@@ -289,6 +353,62 @@ fn expand_pkg_vars(value: &str, pkgname: &str) -> String {
         .replace("$pkgbase", pkgname)
         .trim_matches(['"', '\''])
         .to_string()
+}
+
+/// Track simple variable assignments to help see through indirection obfuscation
+/// where attackers use variables to hide command names (e.g., CMD=bun, then $CMD add).
+/// Only tracks literal string assignments; arithmetic and command substitution are
+/// deliberately skipped to avoid executing anything.
+fn track_variable_assignments(content: &str) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    let re = regex_lite::var_assign();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(caps) = re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str().to_string());
+            let value = caps.get(2).map(|m| m.as_str().to_string());
+            if let (Some(n), Some(v)) = (name, value) {
+                // Only track short simple values to avoid false positives.
+                if v.len() <= 50 && !v.contains('<') && !v.contains('(') {
+                    vars.insert(n, v);
+                }
+            }
+        }
+    }
+    vars
+}
+
+/// Extract the full maintainer identifier from the PKGBUILD header,
+/// including both name and email (e.g. `"John Doe <john@example.com>"`).
+/// Returns `None` if no maintainer header is found.
+pub fn extract_maintainer_id(content: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?i)#\s*Maintainer:\s*(.+?)\s*$").ok()?;
+    for line in content.lines() {
+        if let Some(caps) = re.captures(line) {
+            return caps.get(1).map(|m| m.as_str().trim().to_string());
+        }
+    }
+    None
+}
+
+/// Lightweight regex helpers kept in a sub-module so `regex` doesn't compile on
+/// every call.
+mod regex_lite {
+    use std::sync::OnceLock;
+
+    static VAR_ASSIGN: OnceLock<regex::Regex> = OnceLock::new();
+
+    pub fn var_assign() -> &'static regex::Regex {
+        VAR_ASSIGN.get_or_init(|| {
+            regex::Regex::new(
+                r#"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"]*)"|([^\s;|&<>`$()'"]*))"#,
+            )
+            .expect("variable assignment regex must compile")
+        })
+    }
 }
 
 #[cfg(test)]
@@ -315,9 +435,15 @@ mod tests {
 
     #[test]
     fn test_expand_pkg_vars() {
-        assert_eq!(expand_pkg_vars("${pkgname}.install", "alvr"), "alvr.install");
+        assert_eq!(
+            expand_pkg_vars("${pkgname}.install", "alvr"),
+            "alvr.install"
+        );
         assert_eq!(expand_pkg_vars("$pkgname.install", "alvr"), "alvr.install");
-        assert_eq!(expand_pkg_vars("\"$pkgbase.install\"", "alvr"), "alvr.install");
+        assert_eq!(
+            expand_pkg_vars("\"$pkgbase.install\"", "alvr"),
+            "alvr.install"
+        );
         assert_eq!(expand_pkg_vars("custom.install", "alvr"), "custom.install");
     }
 
@@ -337,8 +463,9 @@ mod tests {
             "expected ATOMIC-001 from the install hook; got: {:?}",
             result.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
         );
-        assert!(result.scanned_files.iter().any(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("install")
-        }));
+        assert!(result
+            .scanned_files
+            .iter()
+            .any(|p| { p.extension().and_then(|e| e.to_str()) == Some("install") }));
     }
 }

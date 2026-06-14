@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Severity levels for security findings
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Critical security issue - likely malicious
@@ -141,7 +143,9 @@ pub struct ScanResult {
 impl ScanResult {
     /// Check if any critical findings were found
     pub fn has_critical(&self) -> bool {
-        self.findings.iter().any(|f| f.severity == Severity::Critical)
+        self.findings
+            .iter()
+            .any(|f| f.severity == Severity::Critical)
     }
 
     /// Check if any findings at or above the given severity were found
@@ -298,6 +302,17 @@ pub struct AnalysisContext {
     pub config: ScanConfig,
     /// Path to the PKGBUILD file
     pub file_path: PathBuf,
+    /// Deobfuscated PKGBUILD content (ANSI-C $'...' resolved + adjacent quotes
+    /// flattened), if any obfuscation was detected.
+    pub deobfuscated_pkgbuild_content: Option<String>,
+    /// Deobfuscated install-script content, if any obfuscation was detected.
+    pub deobfuscated_install_content: Option<String>,
+    /// Simple variable tracking: variable name → resolved value for variables
+    /// assigned in the same scope, to help see through indirection obfuscation.
+    pub resolved_variables: std::collections::HashMap<String, String>,
+    /// Full maintainer identifier extracted from the PKGBUILD header line
+    /// (e.g., "John Doe <john@example.com>"), if present.
+    pub maintainer_id: Option<String>,
 }
 
 /// File type for rule matching

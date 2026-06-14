@@ -260,7 +260,7 @@ impl SecurityAnalyzer for SourceAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{StaticParser, PkgbuildParser};
+    use crate::parser::{PkgbuildParser, StaticParser};
     use crate::types::ScanConfig;
     use std::path::PathBuf;
 
@@ -273,6 +273,10 @@ mod tests {
             install_script: None,
             config: ScanConfig::default(),
             file_path: PathBuf::from("PKGBUILD"),
+            deobfuscated_pkgbuild_content: None,
+            deobfuscated_install_content: None,
+            resolved_variables: std::collections::HashMap::new(),
+            maintainer_id: None,
         }
     }
 

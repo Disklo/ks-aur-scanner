@@ -112,6 +112,10 @@ mod tests {
             install_script: None,
             config: ScanConfig::default(),
             file_path: PathBuf::from("PKGBUILD"),
+            deobfuscated_pkgbuild_content: None,
+            deobfuscated_install_content: None,
+            resolved_variables: std::collections::HashMap::new(),
+            maintainer_id: None,
         };
         let analyzer = IocAnalyzer::new(Arc::new(IocDatabase::embedded()));
         let findings = analyzer.analyze(&context).await.unwrap();

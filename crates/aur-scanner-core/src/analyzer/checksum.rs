@@ -267,7 +267,7 @@ impl ChecksumAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{StaticParser, PkgbuildParser};
+    use crate::parser::{PkgbuildParser, StaticParser};
     use crate::types::ScanConfig;
     use std::path::PathBuf;
 
@@ -280,6 +280,10 @@ mod tests {
             install_script: None,
             config: ScanConfig::default(),
             file_path: PathBuf::from("PKGBUILD"),
+            deobfuscated_pkgbuild_content: None,
+            deobfuscated_install_content: None,
+            resolved_variables: std::collections::HashMap::new(),
+            maintainer_id: None,
         }
     }
 
@@ -336,7 +340,9 @@ sha256sums=('SKIP')
         let findings = analyzer.analyze(&context).await.unwrap();
         // Should NOT have CHK-004 or CHK-005 for VCS sources
         assert!(
-            !findings.iter().any(|f| f.id == "CHK-004" || f.id == "CHK-005"),
+            !findings
+                .iter()
+                .any(|f| f.id == "CHK-004" || f.id == "CHK-005"),
             "VCS source with SKIP should not trigger checksum warnings"
         );
     }
@@ -361,7 +367,9 @@ sha256sums=('SKIP'
         let findings = analyzer.analyze(&context).await.unwrap();
         // Should NOT have CHK-004 or CHK-005
         assert!(
-            !findings.iter().any(|f| f.id == "CHK-004" || f.id == "CHK-005"),
+            !findings
+                .iter()
+                .any(|f| f.id == "CHK-004" || f.id == "CHK-005"),
             "Mixed VCS+regular sources with appropriate checksums should not trigger warnings"
         );
     }
