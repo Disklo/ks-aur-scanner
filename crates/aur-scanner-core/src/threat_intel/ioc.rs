@@ -117,7 +117,9 @@ impl IocDatabase {
                         tracing::info!("merged IOC overrides from {}", path.display());
                         db.merge(extra);
                     }
-                    Err(e) => tracing::warn!("ignoring malformed IOC file {}: {}", path.display(), e),
+                    Err(e) => {
+                        tracing::warn!("ignoring malformed IOC file {}: {}", path.display(), e)
+                    }
                 }
             }
         }
@@ -190,7 +192,9 @@ impl IocDatabase {
                 continue;
             }
             let tokens: Vec<&str> = line
-                .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/'))
+                .split(|c: char| {
+                    !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+                })
                 .filter(|t| !t.is_empty())
                 .collect();
 
@@ -251,7 +255,9 @@ mod tests {
     fn scan_detects_npm_payload_whole_token() {
         let db = IocDatabase::embedded();
         let hits = db.scan_content("npm install atomic-lockfile --silent");
-        assert!(hits.iter().any(|h| h.kind == IocKind::NpmPackage && h.value == "atomic-lockfile"));
+        assert!(hits
+            .iter()
+            .any(|h| h.kind == IocKind::NpmPackage && h.value == "atomic-lockfile"));
     }
 
     #[test]
@@ -272,10 +278,8 @@ mod tests {
     #[test]
     fn merge_unions_indicators() {
         let mut db = IocDatabase::embedded();
-        let extra: IocDatabase = toml::from_str(
-            "[domains]\n\"evil.example\" = \"atomic-arch-2026-06\"\n",
-        )
-        .unwrap();
+        let extra: IocDatabase =
+            toml::from_str("[domains]\n\"evil.example\" = \"atomic-arch-2026-06\"\n").unwrap();
         db.merge(extra);
         assert!(db.domains.contains_key("evil.example"));
     }

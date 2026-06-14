@@ -46,7 +46,12 @@ impl DiskCache {
 
         let mut entries: Vec<_> = std::fs::read_dir(&self.directory)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
+            })
             .filter_map(|e| {
                 let metadata = e.metadata().ok()?;
                 let modified = metadata.modified().ok()?;
@@ -134,7 +139,12 @@ impl Cache for DiskCache {
         if self.directory.exists() {
             for entry in std::fs::read_dir(&self.directory)? {
                 let entry = entry?;
-                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                if entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "json")
+                    .unwrap_or(false)
+                {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }

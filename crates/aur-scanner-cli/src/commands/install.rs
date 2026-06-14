@@ -51,7 +51,10 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     println!();
 
     // 1. Resolve the full dependency tree.
-    let opts = ResolveOptions { include_optional: args.include_optional, ..Default::default() };
+    let opts = ResolveOptions {
+        include_optional: args.include_optional,
+        ..Default::default()
+    };
     println!("{}", "Resolving dependency tree...".dimmed());
     let graph = depgraph::resolve(&client, &args.package_names, &opts)
         .await
@@ -72,7 +75,10 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     let mut base_dirs: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut node_base: BTreeMap<String, String> = BTreeMap::new();
     for node in graph.aur_packages() {
-        let base = node.package_base.clone().unwrap_or_else(|| node.name.clone());
+        let base = node
+            .package_base
+            .clone()
+            .unwrap_or_else(|| node.name.clone());
         node_base.insert(node.name.clone(), base.clone());
         base_dirs.entry(base).or_default();
     }
@@ -124,13 +130,21 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     println!();
     println!("{}", "Dependency tree:".cyan().bold());
     print!("{}", sbom::render_tree(&graph, &scans));
-    let opaque: Vec<&String> = scans.iter().filter(|(_, s)| s.opaque).map(|(k, _)| k).collect();
+    let opaque: Vec<&String> = scans
+        .iter()
+        .filter(|(_, s)| s.opaque)
+        .map(|(k, _)| k)
+        .collect();
     if !opaque.is_empty() {
         println!(
             "{} {} package(s) fetch/run external code (opaque): {}",
             "OPAQUE:".red().bold(),
             opaque.len(),
-            opaque.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            opaque
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -144,7 +158,11 @@ pub async fn run(args: InstallArgs) -> Result<()> {
         );
         std::fs::write(path, serde_json::to_string_pretty(&bom)?)
             .with_context(|| format!("writing SBOM to {}", path.display()))?;
-        println!("{} SBOM written to {}", "SBOM:".green().bold(), path.display());
+        println!(
+            "{} SBOM written to {}",
+            "SBOM:".green().bold(),
+            path.display()
+        );
     }
 
     // 4. Gate.
@@ -152,10 +170,14 @@ pub async fn run(args: InstallArgs) -> Result<()> {
     if blocked {
         println!(
             "{}",
-            "GATE: findings at or above the threshold (or an unscannable package).".red().bold()
+            "GATE: findings at or above the threshold (or an unscannable package)."
+                .red()
+                .bold()
         );
         if !args.force {
-            anyhow::bail!("blocked by scan gate; not building (use --force to override deliberately)");
+            anyhow::bail!(
+                "blocked by scan gate; not building (use --force to override deliberately)"
+            );
         }
         println!("{}", "--force given: overriding the gate.".yellow().bold());
     } else {
@@ -164,7 +186,12 @@ pub async fn run(args: InstallArgs) -> Result<()> {
 
     // 5. Confirm, then build in dependency order from the SAME directories.
     if !args.noconfirm {
-        print!("{} ", "Build and install these packages now? [y/N]:".yellow().bold());
+        print!(
+            "{} ",
+            "Build and install these packages now? [y/N]:"
+                .yellow()
+                .bold()
+        );
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -204,7 +231,12 @@ pub async fn run(args: InstallArgs) -> Result<()> {
                 "makepkg failed for '{}' (exit {:?}); stopping. Built so far: {}",
                 base,
                 status.code(),
-                built.iter().filter(|b| *b != &base).cloned().collect::<Vec<_>>().join(", ")
+                built
+                    .iter()
+                    .filter(|b| *b != &base)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }

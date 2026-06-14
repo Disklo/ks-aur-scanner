@@ -101,7 +101,11 @@ fn print_summary(result: &ScanResult) {
             result.findings.len().to_string().bold()
         );
         if *critical > 0 {
-            println!("  {} {}", critical.to_string().red().bold(), "CRITICAL".red());
+            println!(
+                "  {} {}",
+                critical.to_string().red().bold(),
+                "CRITICAL".red()
+            );
         }
         if *high > 0 {
             println!("  {} {}", high.to_string().yellow().bold(), "HIGH".yellow());

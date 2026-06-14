@@ -114,10 +114,7 @@ impl AurScannerPlugin {
                 let mut response = String::new();
                 io::stdin().read_line(&mut response).unwrap();
 
-                if !matches!(
-                    response.trim().to_lowercase().as_str(),
-                    "y" | "yes"
-                ) {
+                if !matches!(response.trim().to_lowercase().as_str(), "y" | "yes") {
                     println!("Installation aborted.");
                     return false;
                 }

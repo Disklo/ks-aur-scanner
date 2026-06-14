@@ -112,7 +112,9 @@ impl AurClient {
 
         // Validate response type
         if response.response_type == "error" {
-            let msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+            let msg = response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string());
             return Err(ScanError::Network(format!("AUR API error: {}", msg)));
         }
 
@@ -147,7 +149,9 @@ impl AurClient {
 
         // Validate response type
         if response.response_type == "error" {
-            let msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+            let msg = response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string());
             return Err(ScanError::Network(format!("AUR API error: {}", msg)));
         }
 
@@ -201,7 +205,10 @@ impl AurClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ScanError::Network(format!("Failed to clone AUR repo: {}", stderr)));
+            return Err(ScanError::Network(format!(
+                "Failed to clone AUR repo: {}",
+                stderr
+            )));
         }
         Ok(())
     }
@@ -211,13 +218,18 @@ impl AurClient {
         // First get package info to find the package base
         let info = self.get_package_info(package_name).await?;
 
-        info!("Fetching PKGBUILD for {} (base: {})", package_name, info.package_base);
+        info!(
+            "Fetching PKGBUILD for {} (base: {})",
+            package_name, info.package_base
+        );
 
         // Create temp directory
-        let temp_dir = TempDir::new()
-            .map_err(|e| ScanError::Io(std::io::Error::other(
-                format!("Failed to create temp directory: {}", e),
-            )))?;
+        let temp_dir = TempDir::new().map_err(|e| {
+            ScanError::Io(std::io::Error::other(format!(
+                "Failed to create temp directory: {}",
+                e
+            )))
+        })?;
 
         // Clone the AUR git repo into the temp directory (hardened).
         self.clone_repo(&info.package_base, temp_dir.path()).await?;
@@ -271,7 +283,9 @@ impl AurClient {
 
         // Validate response type
         if response.response_type == "error" {
-            let msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+            let msg = response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string());
             return Err(ScanError::Network(format!("AUR API error: {}", msg)));
         }
 
@@ -326,9 +340,7 @@ fn find_install_script(dir: &Path, package_base: &str) -> Option<PathBuf> {
     if let Ok(content) = std::fs::read_to_string(&pkgbuild_path) {
         for line in content.lines() {
             if let Some(install_file) = line.strip_prefix("install=") {
-                let install_file = install_file
-                    .trim()
-                    .trim_matches(|c| c == '\'' || c == '"');
+                let install_file = install_file.trim().trim_matches(|c| c == '\'' || c == '"');
                 // Only accept a bare filename inside `dir`; reject traversal so a
                 // hostile install= value cannot escape the package directory.
                 if install_file.is_empty()
@@ -409,7 +421,9 @@ mod tests {
     #[tokio::test]
     async fn test_package_not_found() {
         let client = AurClient::new().unwrap();
-        let info = client.get_package_info("this-package-definitely-does-not-exist-12345").await;
+        let info = client
+            .get_package_info("this-package-definitely-does-not-exist-12345")
+            .await;
         assert!(info.is_err());
     }
 }

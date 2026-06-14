@@ -37,11 +37,7 @@ async fn main() -> Result<()> {
 
     // Read package names from stdin (pacman hook provides this)
     let stdin = io::stdin();
-    let packages: Vec<String> = stdin
-        .lock()
-        .lines()
-        .map_while(Result::ok)
-        .collect();
+    let packages: Vec<String> = stdin.lock().lines().map_while(Result::ok).collect();
 
     let mut has_critical = false;
     let mut has_high = false;

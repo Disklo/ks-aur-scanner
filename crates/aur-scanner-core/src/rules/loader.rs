@@ -60,9 +60,8 @@ impl RuleLoader {
             rule: Vec<Rule>,
         }
 
-        let file: RulesFile = toml::from_str(content).map_err(|e| {
-            ScanError::Config(format!("Failed to parse {}: {}", path.display(), e))
-        })?;
+        let file: RulesFile = toml::from_str(content)
+            .map_err(|e| ScanError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
 
         Ok(file.rule)
     }

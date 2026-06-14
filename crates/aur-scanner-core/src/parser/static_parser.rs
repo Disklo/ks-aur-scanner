@@ -297,7 +297,9 @@ impl StaticParser {
             "install" => pkgbuild.install = Some(value.to_string()),
             "changelog" => pkgbuild.changelog = Some(value.to_string()),
             _ => {
-                pkgbuild.variables.insert(name.to_string(), value.to_string());
+                pkgbuild
+                    .variables
+                    .insert(name.to_string(), value.to_string());
             }
         }
     }

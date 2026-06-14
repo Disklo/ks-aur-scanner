@@ -15,7 +15,7 @@ use aur_scanner_core::{Scanner, Severity};
 use colored::Colorize;
 use std::env;
 use std::io::{self, Write};
-use std::process::{Command, Stdio, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -41,14 +41,20 @@ async fn run() -> Result<ExitCode> {
     let helper_args: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
 
     // Check if this is an install/sync operation that might involve AUR
-    let is_sync = helper_args.iter().any(|a| {
-        *a == "-S" || a.starts_with("-S") || *a == "--sync"
-    });
+    let is_sync = helper_args
+        .iter()
+        .any(|a| *a == "-S" || a.starts_with("-S") || *a == "--sync");
 
     // Check for flags that shouldn't trigger scanning
-    let is_search = helper_args.iter().any(|a| a.contains('s') && a.starts_with('-') && !a.starts_with("--"));
-    let is_query = helper_args.iter().any(|a| *a == "-Q" || a.starts_with("-Q"));
-    let is_info = helper_args.iter().any(|a| a.contains('i') && a.starts_with('-'));
+    let is_search = helper_args
+        .iter()
+        .any(|a| a.contains('s') && a.starts_with('-') && !a.starts_with("--"));
+    let is_query = helper_args
+        .iter()
+        .any(|a| *a == "-Q" || a.starts_with("-Q"));
+    let is_info = helper_args
+        .iter()
+        .any(|a| a.contains('i') && a.starts_with('-'));
 
     if !is_sync || is_search || is_query || is_info {
         // Not an install operation, just pass through
@@ -72,7 +78,7 @@ async fn run() -> Result<ExitCode> {
     for pkg in &packages {
         match is_aur_package(pkg).await {
             Ok(true) => aur_packages.push(*pkg),
-            Ok(false) => {} // Official repo package, skip
+            Ok(false) => {}                    // Official repo package, skip
             Err(_) => aur_packages.push(*pkg), // Assume AUR if check fails
         }
     }
@@ -132,8 +138,14 @@ async fn run() -> Result<ExitCode> {
             println!("{}", "OK".green());
         } else {
             all_passed = false;
-            let crit_count = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-            let high_count = findings.iter().filter(|f| f.severity == Severity::High).count();
+            let crit_count = findings
+                .iter()
+                .filter(|f| f.severity == Severity::Critical)
+                .count();
+            let high_count = findings
+                .iter()
+                .filter(|f| f.severity == Severity::High)
+                .count();
 
             if crit_count > 0 {
                 critical_found = true;
@@ -161,10 +173,7 @@ async fn run() -> Result<ExitCode> {
 
     // Prompt based on findings
     if critical_found {
-        println!(
-            "{}",
-            "CRITICAL security issues detected!".red().bold()
-        );
+        println!("{}", "CRITICAL security issues detected!".red().bold());
         println!();
         print!(
             "{} ",
@@ -182,10 +191,7 @@ async fn run() -> Result<ExitCode> {
 
         println!("{}", "User accepted risks.".dimmed());
     } else if !all_passed {
-        print!(
-            "{} ",
-            "Some issues found. Continue? [Y/n]:".yellow()
-        );
+        print!("{} ", "Some issues found. Continue? [Y/n]:".yellow());
         io::stdout().flush()?;
 
         let mut input = String::new();
