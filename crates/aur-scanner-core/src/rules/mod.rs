@@ -83,9 +83,18 @@ pub struct CompiledRule {
 #[derive(Clone)]
 pub enum CompiledPattern {
     Regex(Regex),
-    Literal { text: String, case_sensitive: bool },
-    Function { name: Regex, body_pattern: Option<Regex> },
-    Variable { name: String, value_pattern: Option<Regex> },
+    Literal {
+        text: String,
+        case_sensitive: bool,
+    },
+    Function {
+        name: Regex,
+        body_pattern: Option<Regex>,
+    },
+    Variable {
+        name: String,
+        value_pattern: Option<Regex>,
+    },
 }
 
 impl CompiledPattern {
@@ -105,20 +114,17 @@ impl CompiledPattern {
             }),
             Pattern::Function { name, body_pattern } => {
                 let name_re = Regex::new(name)?;
-                let body_re = body_pattern
-                    .as_ref()
-                    .map(|p| Regex::new(p))
-                    .transpose()?;
+                let body_re = body_pattern.as_ref().map(|p| Regex::new(p)).transpose()?;
                 Ok(CompiledPattern::Function {
                     name: name_re,
                     body_pattern: body_re,
                 })
             }
-            Pattern::Variable { name, value_pattern } => {
-                let value_re = value_pattern
-                    .as_ref()
-                    .map(|p| Regex::new(p))
-                    .transpose()?;
+            Pattern::Variable {
+                name,
+                value_pattern,
+            } => {
+                let value_re = value_pattern.as_ref().map(|p| Regex::new(p)).transpose()?;
                 Ok(CompiledPattern::Variable {
                     name: name.clone(),
                     value_pattern: value_re,
@@ -271,9 +277,9 @@ impl RuleEngine {
         _rule: &Rule,
     ) -> Option<(usize, String)> {
         match pattern {
-            CompiledPattern::Regex(re) => {
-                re.find(line).map(|m| (m.start() + 1, m.as_str().to_string()))
-            }
+            CompiledPattern::Regex(re) => re
+                .find(line)
+                .map(|m| (m.start() + 1, m.as_str().to_string())),
             CompiledPattern::Literal {
                 text,
                 case_sensitive,
@@ -310,7 +316,11 @@ impl Default for RuleEngine {
         for dir in user_rule_dirs() {
             if dir.is_dir() {
                 if let Err(e) = engine.load_rules_from_dir(&dir) {
-                    tracing::warn!("failed to load community rules from {}: {}", dir.display(), e);
+                    tracing::warn!(
+                        "failed to load community rules from {}: {}",
+                        dir.display(),
+                        e
+                    );
                 }
             }
         }
@@ -355,7 +365,10 @@ fn informational_lines(lines: &[&str]) -> Vec<bool> {
 /// somewhere and must still be scanned, so they return `None`.
 fn heredoc_message_delim(line: &str) -> Option<String> {
     let pos = line.find("<<")?;
-    let rest = line[pos + 2..].strip_prefix('-').unwrap_or(&line[pos + 2..]).trim_start();
+    let rest = line[pos + 2..]
+        .strip_prefix('-')
+        .unwrap_or(&line[pos + 2..])
+        .trim_start();
     let bytes = rest.as_bytes();
     let quote = match bytes.first() {
         Some(&b'"') | Some(&b'\'') => Some(bytes[0]),
@@ -1364,6 +1377,135 @@ pub fn get_builtin_rules() -> Vec<Rule> {
             cwe_id: Some("CWE-506".to_string()),
             enabled: true,
         },
+
+        // ============================================================
+        // HIGH/MEDIUM: GTFOBins — legitimate binary abuse patterns
+        // These are common techniques for abusing standard system tools
+        // to execute code, write files, or establish persistence.
+        // ============================================================
+        Rule {
+            id: "GTFO-001".to_string(),
+            name: "GTFOBins: find -exec code execution".to_string(),
+            description: "find -exec is a common GTFOBins technique for arbitrary code execution via a legitimate tool.".to_string(),
+            severity: Severity::High,
+            category: Category::MaliciousCode,
+            patterns: vec![Pattern::Regex {
+                pattern: r"find\s+.*-exec\s+".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Avoid find -exec in package scripts; use install or cp instead.".to_string(),
+            cwe_id: None,
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-002".to_string(),
+            name: "GTFOBins: awk system execution".to_string(),
+            description: "awk invoking system() is a technique for shell command execution hidden inside a text-processing tool.".to_string(),
+            severity: Severity::High,
+            category: Category::CommandInjection,
+            patterns: vec![Pattern::Regex {
+                pattern: r"awk\s+.*system\s*\(".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Avoid awk system() in package scripts.".to_string(),
+            cwe_id: Some("CWE-78".to_string()),
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-003".to_string(),
+            name: "GTFOBins: tar checkpoint exec".to_string(),
+            description: "tar --checkpoint-action=exec= runs an arbitrary command during archive extraction.".to_string(),
+            severity: Severity::Critical,
+            category: Category::CommandInjection,
+            patterns: vec![Pattern::Regex {
+                pattern: r"tar\s+.*--checkpoint-action\s*=\s*exec\s*=".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Never use tar --checkpoint-action in package scripts.".to_string(),
+            cwe_id: Some("CWE-78".to_string()),
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-004".to_string(),
+            name: "GTFOBins: inline script interpreter".to_string(),
+            description: "perl -e, ruby -e, or php -r is used for inline code execution from a package script.".to_string(),
+            severity: Severity::High,
+            category: Category::MaliciousCode,
+            patterns: vec![
+                Pattern::Regex { pattern: r"\bperl\s+-e\s+".to_string() },
+                Pattern::Regex { pattern: r"\bruby\s+-e\s+".to_string() },
+                Pattern::Regex { pattern: r"\bphp\s+-r\s+".to_string() },
+            ],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Inline interpreter execution is highly unusual in package scripts.".to_string(),
+            cwe_id: Some("CWE-94".to_string()),
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-005".to_string(),
+            name: "GTFOBins: dd raw device access".to_string(),
+            description: "dd writing directly to block devices or raw files from a package script is suspicious.".to_string(),
+            severity: Severity::High,
+            category: Category::PrivilegeEscalation,
+            patterns: vec![Pattern::Regex {
+                pattern: r"\bdd\s+.*(of=/dev/|if=/dev/)".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Packages must never write raw block devices via dd.".to_string(),
+            cwe_id: None,
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-006".to_string(),
+            name: "GTFOBins: openssl crypto in script".to_string(),
+            description: "openssl enc is used for crypto operations in a package script, which can hide payloads or exfiltrate data.".to_string(),
+            severity: Severity::Medium,
+            category: Category::Obfuscation,
+            patterns: vec![Pattern::Regex {
+                pattern: r"\bopenssl\s+enc\b".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Crypto operations in package scripts are unusual; verify their purpose.".to_string(),
+            cwe_id: None,
+            enabled: true,
+        },
+        Rule {
+            id: "GTFO-007".to_string(),
+            name: "GTFOBins: xargs shell execution".to_string(),
+            description: "xargs invoking a shell for command execution can hide malicious commands in pipeline form.".to_string(),
+            severity: Severity::Medium,
+            category: Category::CommandInjection,
+            patterns: vec![Pattern::Regex {
+                pattern: r"xargs\s+.*\b(ba)?sh\b".to_string(),
+            }],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Avoid piping to shells via xargs in package scripts.".to_string(),
+            cwe_id: Some("CWE-78".to_string()),
+            enabled: true,
+        },
+
+        // ============================================================
+        // LOW: Pacman ALPM hook installation
+        // ============================================================
+        Rule {
+            id: "HOOK-001".to_string(),
+            name: "Pacman ALPM hook installed".to_string(),
+            description: "Package installs a pacman hook into /usr/share/libalpm/hooks/ or /etc/pacman.d/hooks/. ALPM hooks run arbitrary commands during any pacman transaction and persist after package removal unless explicitly cleaned up. Can be legitimate for fontconfig, systemd, filesystem snapshot tools, and other packages that need to react to system-wide package events, but is a powerful persistence vector if abused. Proceed with caution.".to_string(),
+            severity: Severity::Low,
+            category: Category::Persistence,
+            patterns: vec![
+                Pattern::Regex {
+                    pattern: r"/usr/share/libalpm/hooks/".to_string(),
+                },
+                Pattern::Regex {
+                    pattern: r"/etc/pacman\.d/hooks/".to_string(),
+                },
+            ],
+            file_types: vec![FileType::Pkgbuild, FileType::InstallScript],
+            recommendation: "Verify the hook's Exec= line. A malicious hook can run arbitrary code on every pacman transaction, surviving even package removal.".to_string(),
+            cwe_id: Some("CWE-506".to_string()),
+            enabled: true,
+        },
     ]
 }
 
@@ -1464,7 +1606,9 @@ mod tests {
         let content = "post_install() {\n    cat << EOF\nAdd this to ~/.zshrc:\n    source /usr/share/x.zsh\nEOF\n}";
         let matches = engine.match_content(content, FileType::InstallScript);
         assert!(
-            !matches.iter().any(|m| m.rule_id == "ENV-003" || m.rule_id == "HIDDEN-001"),
+            !matches
+                .iter()
+                .any(|m| m.rule_id == "ENV-003" || m.rule_id == "HIDDEN-001"),
             "heredoc message should not trigger path rules: {matches:?}"
         );
     }
@@ -1509,7 +1653,8 @@ mod tests {
     #[test]
     fn test_match_atomic_ebpf_artifact() {
         let engine = RuleEngine::default();
-        let matches = engine.match_content("clang -O2 -target bpf -c scales.bpf.c", FileType::Pkgbuild);
+        let matches =
+            engine.match_content("clang -O2 -target bpf -c scales.bpf.c", FileType::Pkgbuild);
         assert!(matches.iter().any(|m| m.rule_id == "ATOMIC-003"));
     }
 
@@ -1520,5 +1665,95 @@ mod tests {
         // NOT trigger ATOMIC-002 (which is scoped to install scripts only).
         let matches = engine.match_content("npm install --offline", FileType::Pkgbuild);
         assert!(!matches.iter().any(|m| m.rule_id == "ATOMIC-002"));
+    }
+
+    #[test]
+    fn test_gtfo_find_exec() {
+        let engine = RuleEngine::default();
+        for content in [
+            "find /tmp -type f -exec rm {} \\;",
+            "find . -name '*.txt' -exec sh -c 'cat' {} \\;",
+        ] {
+            assert!(
+                engine
+                    .match_content(content, FileType::Pkgbuild)
+                    .iter()
+                    .any(|m| m.rule_id == "GTFO-001"),
+                "GTFO-001 must fire on: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gtfo_awk_system() {
+        let engine = RuleEngine::default();
+        let m = engine.match_content("awk 'BEGIN { system(\"id\") }'", FileType::Pkgbuild);
+        assert!(m.iter().any(|x| x.rule_id == "GTFO-002"));
+    }
+
+    #[test]
+    fn test_gtfo_tar_checkpoint() {
+        let engine = RuleEngine::default();
+        let m = engine.match_content(
+            "tar --checkpoint-action=exec=/bin/sh -xf archive.tar",
+            FileType::Pkgbuild,
+        );
+        assert!(m.iter().any(|x| x.rule_id == "GTFO-003"));
+    }
+
+    #[test]
+    fn test_gtfo_inline_script() {
+        let engine = RuleEngine::default();
+        for content in [
+            "perl -e 'system(\"id\")'",
+            "ruby -e 'exec(\"id\")'",
+            "php -r 'passthru(\"id\");'",
+        ] {
+            assert!(
+                engine
+                    .match_content(content, FileType::Pkgbuild)
+                    .iter()
+                    .any(|m| m.rule_id == "GTFO-004"),
+                "GTFO-004 must fire on: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gtfo_no_false_positive() {
+        let engine = RuleEngine::default();
+        // Legitimate tar archive creation must not trigger GTFO-003.
+        let m = engine.match_content("tar -czf archive.tar.gz sources/", FileType::Pkgbuild);
+        assert!(!m.iter().any(|x| x.rule_id == "GTFO-003"));
+        // grep finding something must not trigger GTFO-001.
+        let m = engine.match_content("grep -r \"pattern\" .", FileType::Pkgbuild);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_hook001_detects_pacman_hook_install() {
+        let engine = RuleEngine::default();
+        for content in [
+            "install -Dm644 hook.hook \"$pkgdir/usr/share/libalpm/hooks/my.hook\"",
+            "cp font.hook /usr/share/libalpm/hooks/",
+            "/etc/pacman.d/hooks/custom.hook",
+        ] {
+            let m = engine.match_content(content, FileType::Pkgbuild);
+            assert!(
+                m.iter().any(|x| x.rule_id == "HOOK-001"),
+                "HOOK-001 must fire on: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hook001_no_false_positive_on_non_hook_paths() {
+        let engine = RuleEngine::default();
+        // Generic hook word in unrelated context should not fire.
+        let m = engine.match_content(
+            "install -Dm755 hook-script \"$pkgdir/usr/bin/hook-script\"",
+            FileType::Pkgbuild,
+        );
+        assert!(!m.iter().any(|x| x.rule_id == "HOOK-001"));
     }
 }
