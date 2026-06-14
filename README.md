@@ -104,7 +104,7 @@ This scanner implements detection rules based on real-world attacks and security
 
 | Feature | Description |
 |---------|-------------|
-| **Static Analysis** | 70+ detection codes across pattern rules and dedicated analyzers, in one auditable catalog |
+| **Static Analysis** | 90+ detection codes across pattern rules and dedicated analyzers, in one auditable catalog |
 | **Install Script Scanning** | Analyzes `.install` scripts for persistence mechanisms |
 | **Source Verification** | Validates URLs, checksums, and download sources |
 | **AUR Integration** | Fetch and scan packages directly from AUR before installation |
@@ -574,6 +574,7 @@ NeedsTargets
 | `EXFIL-001` | Curl POST data exfiltration | Data Exfiltration | rules | CWE-200 |
 | `EXFIL-002` | Netcat data transfer | Data Exfiltration | rules | CWE-200 |
 | `EXFIL-003` | Discord/Telegram webhook | Data Exfiltration | rules | CWE-506 |
+| `GTFO-003` | GTFOBins: tar checkpoint exec | Command Injection | rules | CWE-78 |
 | `INSTALL-001` | Python execution in install script | Malicious Code | rules | CWE-94 |
 | `INSTALL-003` | Network access in install script | Network Security | rules | CWE-494 |
 | `INSTALL-004` | Language package manager invoked in install hook | Malicious Code | rules | CWE-494 |
@@ -601,6 +602,10 @@ NeedsTargets
 | `DEEP-002` | Large embedded encoded blob | Obfuscation | deep | CWE-506 |
 | `ENV-002` | PATH manipulation | Malicious Code | rules | CWE-426 |
 | `FUNC-001` | Network access in a build function | Network Security | pattern | - |
+| `GTFO-001` | GTFOBins: find -exec code execution | Malicious Code | rules | - |
+| `GTFO-002` | GTFOBins: awk system execution | Command Injection | rules | CWE-78 |
+| `GTFO-004` | GTFOBins: inline script interpreter | Malicious Code | rules | CWE-94 |
+| `GTFO-005` | GTFOBins: dd raw device access | Privilege Escalation | rules | - |
 | `HIDDEN-001` | Hidden file creation in home | Malicious Code | rules | - |
 | `HIDDEN-002` | Tmp directory execution | Malicious Code | rules | - |
 | `HIDDEN-003` | Binary in non-standard location | Malicious Code | rules | - |
@@ -614,6 +619,7 @@ NeedsTargets
 | `PRIV-005` | Kernel module operations | Privilege Escalation | privilege | - |
 | `PRIV-006` | Sudo in an install hook | Privilege Escalation | privilege | CWE-250 |
 | `PROV-001` | Package gained risky behavior | Suspicious Metadata | provenance | CWE-506 |
+| `PROV-002` | Maintainer changed with risky behavior | Suspicious Metadata | provenance | CWE-506 |
 | `SRC-002` | Suspicious source domain | Network Security | source | - |
 | `SRC-003` | Raw IP address in source URL | Network Security | source | - |
 | `SRC-004` | URL shortener in source | Network Security | source | - |
@@ -628,6 +634,8 @@ NeedsTargets
 | `CHK-002` | MD5 checksums used | Cryptography | checksum | CWE-328 |
 | `CHK-003` | SHA1 checksums used | Cryptography | checksum | CWE-328 |
 | `CHK-004` | Some sources use SKIP checksum | Cryptography | checksum | CWE-354 |
+| `GTFO-006` | GTFOBins: openssl enc in script | Obfuscation | rules | - |
+| `GTFO-007` | GTFOBins: xargs shell execution | Command Injection | rules | CWE-78 |
 | `OBF-004` | String concatenation obfuscation | Obfuscation | rules | - |
 | `PRIV-004` | Capabilities being set | Privilege Escalation | privilege | CWE-250 |
 | `SRC-001` | Insecure source/transport protocol | Network Security | source | CWE-319 |
@@ -637,7 +645,12 @@ NeedsTargets
 
 | Code | Name | Category | Detector | CWE |
 |------|------|----------|----------|-----|
+| `DEEP-003` | Deobfuscation applied during scan | Obfuscation | deep | - |
+| `HOOK-001` | Pacman ALPM hook installed | Persistence | rules | CWE-506 |
 | `META-001` | Provides impersonation | Suspicious Metadata | rules | - |
+| `META-003` | Orphaned AUR dependency | Dependencies | system | CWE-1104 |
+| `META-004` | Out-of-date AUR dependency | Dependencies | system | CWE-1104 |
+| `PROV-003` | Maintainer changed since last scan | Suspicious Metadata | provenance | - |
 | `SRC-006` | VCS source from non-standard host | Network Security | source | - |
 
 ## Custom & Community Rules
