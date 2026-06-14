@@ -38,6 +38,8 @@ reference = ""
 "atomic-lockfile" = "atomic-arch-2026-06"
 "js-digest" = "atomic-arch-2026-06"
 "lockfile-js" = "atomic-arch-2026-06"
+"nextfile-js" = "atomic-arch-2026-06"
+"ansicolor" = "atomic-arch-2026-06"
 
 # File-name artifacts dropped or compiled by the payload.
 [files]
