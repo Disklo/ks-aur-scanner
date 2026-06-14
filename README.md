@@ -150,7 +150,7 @@ gpg --recv-keys 25631EAE3F43999050B7D7021132BF893C33FB51
 > promoted to stable. The RC **fails closed** — the `paru`/`yay` wrapper and the
 > pacman hook now *deny* on a scan/fetch error, a timeout, or a non-interactive
 > (no-TTY) prompt instead of proceeding. That's the right behavior for a security
-> gate, but read the [CHANGELOG](https://github.com/KiefStudioMA/ks-aur-scanner/blob/v1.1.0-rc1/CHANGELOG.md) before driving it from scripts or
+> gate, but read the [release notes](https://github.com/KiefStudioMA/ks-aur-scanner/releases/tag/v1.1.0-rc1) before driving it from scripts or
 > CI. Production systems should stay on the stable `aur-scanner`.
 
 ### From Source
