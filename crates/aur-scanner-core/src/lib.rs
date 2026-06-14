@@ -388,7 +388,10 @@ pub fn extract_maintainer_id(content: &str) -> Option<String> {
     let re = regex::Regex::new(r"(?i)#\s*Maintainer:\s*(.+?)\s*$").ok()?;
     for line in content.lines() {
         if let Some(caps) = re.captures(line) {
-            return caps.get(1).map(|m| m.as_str().trim().to_string());
+            let raw = caps.get(1).map(|m| m.as_str().trim());
+            // Strip trailing # comments on the same line.
+            let cleaned = raw.map(|s| s.splitn(2, '#').next().unwrap_or(s).trim().to_string());
+            return cleaned.filter(|s| !s.is_empty());
         }
     }
     None
@@ -467,5 +470,26 @@ mod tests {
             .scanned_files
             .iter()
             .any(|p| { p.extension().and_then(|e| e.to_str()) == Some("install") }));
+    }
+
+    #[test]
+    fn test_extract_maintainer_id_strips_trailing_comment() {
+        let content = "# Maintainer: John Doe <john@example.com>  # adopted 2024";
+        assert_eq!(
+            extract_maintainer_id(content).as_deref(),
+            Some("John Doe <john@example.com>")
+        );
+    }
+
+    #[test]
+    fn test_extract_maintainer_id_no_header_returns_none() {
+        assert_eq!(extract_maintainer_id("pkgname=foo\npkgver=1"), None);
+    }
+
+    #[test]
+    fn test_extract_maintainer_id_empty_after_comment_strip() {
+        // Entire value is a comment — should return None.
+        let content = "# Maintainer: # was orphaned";
+        assert_eq!(extract_maintainer_id(content), None);
     }
 }

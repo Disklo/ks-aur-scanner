@@ -95,10 +95,9 @@ fn resolve_variables(line: &str, vars: &HashMap<String, String>) -> String {
     }
     let re = Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})").unwrap();
     let mut result = line.to_string();
-    let mut changed = true;
-    // Loop to handle nested references (rare but possible).
-    while changed {
-        changed = false;
+    // Loop to handle nested references (rare but possible). Capped at 10
+    // iterations to prevent infinite loops from circular assignments.
+    for _ in 0..10 {
         let replaced = re
             .replace_all(&result, |caps: &regex::Captures| {
                 let key_raw = &caps[1];
@@ -111,10 +110,10 @@ fn resolve_variables(line: &str, vars: &HashMap<String, String>) -> String {
                     .unwrap_or_else(|| caps[0].to_string())
             })
             .to_string();
-        if replaced != result {
-            changed = true;
-            result = replaced;
+        if replaced == result {
+            break;
         }
+        result = replaced;
     }
     result
 }
@@ -502,5 +501,14 @@ mod tests {
             !got.contains("add evil"),
             "comment assignment must not resolve; got: {got:?}"
         );
+    }
+
+    #[test]
+    fn circular_variable_refs_do_not_loop() {
+        // Circular assignments must not cause an infinite loop.
+        let text = "A=$B\nB=$A\n$A add evil";
+        // This must complete (no hang) — result may be partially resolved
+        // but the loop cap of 10 iterations ensures termination.
+        deobfuscate_shell_text(text);
     }
 }

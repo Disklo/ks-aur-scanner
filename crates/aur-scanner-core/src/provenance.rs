@@ -163,13 +163,10 @@ impl ProvenanceStore {
         let current_markers = Self::markers_in(content);
         let sha = sha256_hex(content);
 
-        let maintainer_changed = maintainer
-            .and_then(|m| {
-                self.snapshots
-                    .get(package)
-                    .and_then(|s| s.maintainer.as_deref())
-                    .map(|prev| prev != m)
-            })
+        let maintainer_changed = self
+            .snapshots
+            .get(package)
+            .map(|s| s.maintainer.as_deref() != maintainer)
             .unwrap_or(false);
 
         if let Some(prev) = self.snapshots.get(package) {
@@ -441,6 +438,36 @@ mod tests {
             f.iter().any(|x| x.id == "PROV-003"),
             "username change alone must trigger PROV-003"
         );
+    }
+
+    #[test]
+    fn orphan_adoption_triggers_maintainer_change() {
+        let mut s = store();
+        let c = "build() { make }\nnpm install evil";
+        // First sighting: no maintainer (orphaned).
+        s.evaluate("pkg", c, "t0", Path::new("PKGBUILD"), None);
+        // Second: maintainer appears + risky behavior added — classic hijack.
+        let f = s.evaluate(
+            "pkg",
+            "build() { make }\nnpm install evil",
+            "t1",
+            Path::new("PKGBUILD"),
+            Some("hijacker <evil@bad.com>"),
+        );
+        assert!(
+            !f.is_empty(),
+            "orphan adoption with risky behavior must produce findings"
+        );
+    }
+
+    #[test]
+    fn maintainer_vanishing_triggers_change() {
+        let mut s = store();
+        let c = "build() { make }";
+        s.evaluate("pkg", c, "t0", Path::new("PKGBUILD"), Some("alice <alice@good.com>"));
+        // Maintainer disappears.
+        let f = s.evaluate("pkg", c, "t1", Path::new("PKGBUILD"), None);
+        assert!(f.iter().any(|x| x.id == "PROV-003"), "maintainer removal must trigger PROV-003");
     }
 
     #[test]
