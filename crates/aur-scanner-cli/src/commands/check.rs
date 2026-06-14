@@ -86,7 +86,11 @@ pub async fn run(args: CheckArgs) -> Result<()> {
     let opts = ResolveOptions {
         include_optional: args.include_optional,
         // --no-deps => expand nothing past the roots.
-        max_depth: if args.resolve_deps { ResolveOptions::default().max_depth } else { 0 },
+        max_depth: if args.resolve_deps {
+            ResolveOptions::default().max_depth
+        } else {
+            0
+        },
         ..ResolveOptions::default()
     };
     println!("{}", "Resolving dependency tree...".dimmed());
@@ -124,25 +128,84 @@ pub async fn run(args: CheckArgs) -> Result<()> {
     for node in graph.aur_packages() {
         // Prefer the exact on-disk PKGBUILD when the package was provided via
         // --local: that is the same content the build will use (no TOCTOU).
-        let local_pkgbuild = local_dir_by_name.get(&node.name).map(|d| d.join("PKGBUILD"));
-        let origin = if local_pkgbuild.is_some() { "local" } else { "aur" };
-        print!("{} {} {} ", "Scanning:".dimmed(), node.name.white(), format!("({origin})").dimmed());
+        let local_pkgbuild = local_dir_by_name
+            .get(&node.name)
+            .map(|d| d.join("PKGBUILD"));
+        let origin = if local_pkgbuild.is_some() {
+            "local"
+        } else {
+            "aur"
+        };
+        print!(
+            "{} {} {} ",
+            "Scanning:".dimmed(),
+            node.name.white(),
+            format!("({origin})").dimmed()
+        );
         io::stdout().flush().ok();
 
         let result = match &local_pkgbuild {
-            Some(p) => scanner.scan_pkgbuild(p).await.map_err(|e| format!("scan error: {e}")),
+            Some(p) => scanner
+                .scan_pkgbuild(p)
+                .await
+                .map_err(|e| format!("scan error: {e}")),
             None => match client.fetch_pkgbuild(&node.name).await {
-                Ok(fetched) => {
-                    scanner
-                        .scan_pkgbuild(&fetched.pkgbuild_path)
-                        .await
-                        .map_err(|e| format!("scan error: {e}"))
-                }
+                Ok(fetched) => scanner
+                    .scan_pkgbuild(&fetched.pkgbuild_path)
+                    .await
+                    .map_err(|e| format!("scan error: {e}")),
                 Err(e) => Err(format!("fetch error: {e}")),
             },
         };
         match result {
-            Ok(result) => {
+            Ok(mut result) => {
+                // Inject dependency-tree metadata findings for orphaned/
+                // out-of-date AUR packages that are higher hijack risks.
+                if node.orphaned {
+                    result.findings.push(aur_scanner_core::Finding {
+                        id: "META-003".to_string(),
+                        severity: aur_scanner_core::Severity::Low,
+                        category: aur_scanner_core::Category::Dependencies,
+                        title: "Orphaned AUR dependency".to_string(),
+                        description: format!(
+                            "'{}' has no maintainer; orphaned packages are the primary \
+                             AUR hijack vector. Verify before building.",
+                            node.name
+                        ),
+                        location: aur_scanner_core::Location {
+                            file: std::path::PathBuf::from("PKGBUILD"),
+                            line: None,
+                            column: None,
+                            snippet: None,
+                        },
+                        recommendation: "Consider alternatives or verify the package carefully."
+                            .to_string(),
+                        cwe_id: Some("CWE-1104".to_string()),
+                        metadata: serde_json::json!({}),
+                    });
+                }
+                if node.out_of_date {
+                    result.findings.push(aur_scanner_core::Finding {
+                        id: "META-004".to_string(),
+                        severity: aur_scanner_core::Severity::Low,
+                        category: aur_scanner_core::Category::Dependencies,
+                        title: "Out-of-date AUR dependency".to_string(),
+                        description: format!(
+                            "'{}' is flagged out of date and may be unmaintained — \
+                             a higher hijack risk. Verify before building.",
+                            node.name
+                        ),
+                        location: aur_scanner_core::Location {
+                            file: std::path::PathBuf::from("PKGBUILD"),
+                            line: None,
+                            column: None,
+                            snippet: None,
+                        },
+                        recommendation: "Verify the package is still maintained.".to_string(),
+                        cwe_id: Some("CWE-1104".to_string()),
+                        metadata: serde_json::json!({}),
+                    });
+                }
                 let scan = ComponentScan::from_findings(&result.findings);
                 total_critical += scan.critical;
                 total_high += scan.high;
@@ -163,15 +226,18 @@ pub async fn run(args: CheckArgs) -> Result<()> {
 
     // 3. Render the reviewable tree.
     println!();
-    println!("{}", "Dependency tree (review before installing):".cyan().bold());
+    println!(
+        "{}",
+        "Dependency tree (review before installing):".cyan().bold()
+    );
     print!("{}", sbom::render_tree(&graph, &scans));
     print_orphans(&graph);
+    print_out_of_date(&graph);
 
     // Loudly call out opaque boundaries: packages that fetch/run external code.
     // The scanner intentionally does NOT follow these, so their real behavior
     // is unknown -- this is the "it's trying to run something from <url>" case.
-    let opaque: Vec<(&String, &ComponentScan)> =
-        scans.iter().filter(|(_, s)| s.opaque).collect();
+    let opaque: Vec<(&String, &ComponentScan)> = scans.iter().filter(|(_, s)| s.opaque).collect();
     if !opaque.is_empty() {
         println!();
         println!(
@@ -206,8 +272,13 @@ pub async fn run(args: CheckArgs) -> Result<()> {
             &sbom::now_timestamp(),
         );
         let json = serde_json::to_string_pretty(&bom)?;
-        std::fs::write(path, json).with_context(|| format!("writing SBOM to {}", path.display()))?;
-        println!("{} CycloneDX SBOM written to {}", "SBOM:".green().bold(), path.display());
+        std::fs::write(path, json)
+            .with_context(|| format!("writing SBOM to {}", path.display()))?;
+        println!(
+            "{} CycloneDX SBOM written to {}",
+            "SBOM:".green().bold(),
+            path.display()
+        );
         println!();
     }
 
@@ -247,7 +318,12 @@ pub async fn run(args: CheckArgs) -> Result<()> {
     if args.interactive && (total_critical > 0 || total_high > 0) {
         println!();
         if total_critical > 0 {
-            println!("{}", "WARNING: Critical security issues in the dependency tree!".red().bold());
+            println!(
+                "{}",
+                "WARNING: Critical security issues in the dependency tree!"
+                    .red()
+                    .bold()
+            );
         }
         print!("{} ", "Proceed with installation? [y/N]:".yellow().bold());
         io::stdout().flush()?;
@@ -268,11 +344,17 @@ pub async fn run(args: CheckArgs) -> Result<()> {
 }
 
 fn print_findings_for(pkg: &str, findings: &[aur_scanner_core::Finding], min: Option<Severity>) {
-    for f in findings
-        .iter()
-        .filter(|f| min.map(|m| f.severity <= m).unwrap_or(f.severity <= Severity::High))
-    {
-        println!("    {} {} [{}] {}", "·".dimmed(), pkg.dimmed(), f.severity, f.title);
+    for f in findings.iter().filter(|f| {
+        min.map(|m| f.severity <= m)
+            .unwrap_or(f.severity <= Severity::High)
+    }) {
+        println!(
+            "    {} {} [{}] {}",
+            "·".dimmed(),
+            pkg.dimmed(),
+            f.severity,
+            f.title
+        );
     }
 }
 
@@ -288,6 +370,22 @@ fn print_orphans(graph: &DependencyGraph) {
             "  {} orphaned AUR package(s) in tree (higher hijack risk): {}",
             "note:".yellow(),
             orphans.join(", ")
+        );
+    }
+}
+
+fn print_out_of_date(graph: &DependencyGraph) {
+    let ood: Vec<&str> = graph
+        .nodes
+        .values()
+        .filter(|n| n.source == PackageSource::Aur && n.out_of_date)
+        .map(|n| n.name.as_str())
+        .collect();
+    if !ood.is_empty() {
+        println!(
+            "  {} out-of-date AUR package(s) — unmaintained, higher hijack risk: {}",
+            "note:".yellow(),
+            ood.join(", ")
         );
     }
 }
